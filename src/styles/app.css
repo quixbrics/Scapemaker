@@ -165,7 +165,9 @@
 /* ---------- ruler + lanes ---------- */
 .ruler { height: 24px; flex: 0 0 24px; display: flex; border-bottom: 1px solid var(--line); }
 .ruler-gutter { width: 178px; flex: 0 0 178px; border-right: 1px solid var(--line); }
-.ruler-track { flex: 1; position: relative; overflow: hidden; }
+/* viewport clips the ruler; its scrollLeft is driven by the lanes' scroll */
+.ruler-viewport { flex: 1; overflow: hidden; position: relative; }
+.ruler-track { position: relative; height: 100%; }
 .tick { position: absolute; top: 0; bottom: 0; width: 1px; background: var(--border); }
 .tick-label {
   position: absolute; top: 6px; font-family: var(--font-mono); font-size: 9px;
@@ -173,7 +175,8 @@
 }
 
 .lanes-wrap { flex: 1; overflow: hidden; position: relative; }
-.lanes-scroll { position: absolute; inset: 0; overflow-y: auto; overflow-x: hidden; }
+.lanes-scroll { position: absolute; inset: 0; overflow: auto; }
+.lanes-inner { position: relative; min-width: 100%; }
 
 .lane { height: 80px; display: flex; border-bottom: 1px solid var(--line-soft); }
 .lane.sel-track { background: var(--panel); }
@@ -181,7 +184,10 @@
   width: 178px; flex: 0 0 178px; border-right: 1px solid var(--line); padding: 9px 12px;
   display: flex; flex-direction: column; justify-content: space-between;
   border-left: 2px solid var(--track-hue, var(--text-muted));
+  /* stays put while the time content scrolls horizontally underneath it */
+  position: sticky; left: 0; z-index: 6; background: var(--bg);
 }
+.lane.sel-track .lane-head { background: var(--panel); }
 .lane-head .h-top { display: flex; align-items: baseline; gap: 8px; }
 .lane-head .h-num { font-family: var(--font-mono); font-size: 9.5px; color: var(--text-dim); }
 .lane-head .h-name {
@@ -204,7 +210,7 @@
 .lane.sel-track .h-slider .fill { background: var(--accent); }
 .h-db { font-family: var(--font-mono); font-size: 9px; color: var(--text-faint); width: 32px; text-align: right; }
 
-.lane-body { flex: 1; position: relative; overflow: hidden; }
+.lane-body { flex: 0 0 auto; position: relative; overflow: hidden; }
 .clip {
   position: absolute; top: 7px; bottom: 7px; overflow: hidden; cursor: grab;
   border: 1px solid var(--clip-border, var(--border)); background: var(--clip-bg, transparent);
@@ -225,6 +231,14 @@
   100% { transform: translateX(250%); }
 }
 .pending-label { font-size: 9.5px; color: var(--text-faint); padding: 0 6px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+/* the clip header is pointer-events:none so drags pass through; the cancel
+   button has to opt back in */
+.pending-cancel {
+  pointer-events: auto; margin-left: auto; flex: 0 0 auto; width: 14px; height: 14px;
+  display: flex; align-items: center; justify-content: center; font-size: 13px; line-height: 1;
+  color: var(--text-muted); border-radius: 2px;
+}
+.pending-cancel:hover { color: var(--danger); background: var(--danger-bg); }
 .clip .clip-head {
   position: absolute; top: 0; left: 0; right: 0; height: 15px; display: flex; align-items: center;
   gap: 6px; padding: 0 6px; background: var(--clip-head, transparent); pointer-events: none;

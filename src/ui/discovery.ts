@@ -16,7 +16,7 @@ import { clear, h, svgIcon, timecode } from './dom';
 import { tt } from './tooltip';
 import { licenceShort, licenceTone, makeLicence, ALL_LICENCE_IDS } from '../licence/model';
 import type { SoundResult } from '../sources/types';
-import { searchArchive } from '../sources/archive';
+import { searchArchive, resolveArchiveAudio } from '../sources/archive';
 import { searchAporee, RADIUS_CHOICES_KM } from '../sources/aporee';
 import {
   searchFreesound,
@@ -457,27 +457,50 @@ export class Discovery {
     if (!this.previewAudio.paused) this.previewAudio.pause();
   }
 
-  private preview(r: SoundResult): void {
-    if (!r.previewUrl) {
-      store.toast('info', 'No preview for this item — drag it onto a track to hear it.');
-      return;
-    }
+  private async preview(r: SoundResult): Promise<void> {
     const alreadyPlaying = this.previewingId === r.id && !this.previewAudio.paused;
     if (alreadyPlaying) {
       this.previewAudio.pause();
       return;
     }
+
+    // Freesound hands us a preview URL in the search response. Archive and
+    // aporee don't — the playable file is only known after a per-item
+    // metadata call, so resolve it here, on demand, the first time the
+    // student actually asks to hear it.
+    let url = r.previewUrl;
+    if (!url && (r.source === 'archive' || r.source === 'aporee') && r.nativeId) {
+      this.previewingId = r.id;
+      this.repaintResultLists();
+      const file = await resolveArchiveAudio(r.nativeId).catch(() => null);
+      if (!file) {
+        this.previewingId = null;
+        this.repaintResultLists();
+        store.toast('warn', 'No playable file found for this item.');
+        return;
+      }
+      url = file.url;
+      r.previewUrl = url; // cache on the result so a second click is instant
+    }
+    if (!url) {
+      store.toast('info', 'No preview for this item — drag it onto a track to hear it.');
+      return;
+    }
+
     if (store.get().transport.playing) transport.stop(); // never two things playing at once
-    this.previewAudio.src = r.previewUrl;
+    this.previewAudio.src = url;
     this.previewingId = r.id;
-    this.paintFreesound();
-    this.paintArchive();
+    this.repaintResultLists();
     void this.previewAudio.play().catch(() => {
       store.toast('warn', 'Could not play preview.');
       this.previewingId = null;
-      this.paintFreesound();
-      this.paintArchive();
+      this.repaintResultLists();
     });
+  }
+
+  private repaintResultLists(): void {
+    this.paintFreesound();
+    this.paintArchive();
   }
 
   /** Import at an unspecified track/position (used by the Map tab's row click, and available for programmatic use). */

@@ -48,6 +48,16 @@ export interface ImportOutcome {
 /** Fallback width for the placeholder when the source gives no duration up front (archive/aporee — Freesound does). */
 const UNKNOWN_DURATION_ESTIMATE = 8;
 
+/** In-flight imports, so a student can call one off from the timeline placeholder. */
+const inFlight = new Map<string, AbortController>();
+
+/** Cancel a pending import by its PendingImport id (the × on the placeholder). */
+export function cancelImport(pendingId: string): void {
+  inFlight.get(pendingId)?.abort();
+  inFlight.delete(pendingId);
+  store.removePendingImport(pendingId);
+}
+
 export async function importResultToTimeline(
   result: SoundResult,
   opts: { trackId?: string; start?: number } = {},
@@ -64,6 +74,8 @@ export async function importResultToTimeline(
   const start = opts.start ?? contentEnd(p);
 
   const pendingId = uid('pending');
+  const abort = new AbortController();
+  inFlight.set(pendingId, abort);
   store.addPendingImport({
     id: pendingId,
     trackId,
@@ -73,14 +85,16 @@ export async function importResultToTimeline(
     phase: 'resolving',
     fraction: -1,
   });
+  const cancelled = () => abort.signal.aborted;
 
   try {
     // resolve a fetchable URL — the slow, invisible step on archive/aporee
     let downloadUrl = result.previewUrl;
     if (!downloadUrl && (result.source === 'archive' || result.source === 'aporee') && result.nativeId) {
-      const file = await resolveArchiveAudio(result.nativeId).catch(() => null);
+      const file = await resolveArchiveAudio(result.nativeId, abort.signal).catch(() => null);
       if (file) downloadUrl = file.url;
     }
+    if (cancelled()) return { ok: false, reason: 'cancelled' };
     if (!downloadUrl) {
       return {
         ok: false,
@@ -95,20 +109,28 @@ export async function importResultToTimeline(
 
     store.updatePendingImport(pendingId, { phase: 'fetching', fraction: 0 });
     try {
-      await assetStore.acquire(ref, { kind: 'url', url: downloadUrl }, (fraction) => {
-        store.updatePendingImport(pendingId, {
-          phase: fraction < 0 ? 'decoding' : 'fetching',
-          fraction,
-        });
-      });
+      await assetStore.acquire(
+        ref,
+        { kind: 'url', url: downloadUrl },
+        (fraction) => {
+          store.updatePendingImport(pendingId, {
+            phase: fraction < 0 ? 'decoding' : 'fetching',
+            fraction,
+          });
+        },
+        abort.signal,
+      );
     } catch (err) {
+      if (cancelled()) return { ok: false, reason: 'cancelled' };
       return { ok: false, reason: err instanceof Error ? err.message : 'Fetch/decode failed.' };
     }
+    if (cancelled()) return { ok: false, reason: 'cancelled' };
 
     placeAsset(ref, trackId, start);
     if (isRestrictive(ref.licence) || ref.licence.id === 'unknown') acknowledgeRestriction(ref.id);
     return { ok: true };
   } finally {
+    inFlight.delete(pendingId);
     store.removePendingImport(pendingId);
   }
 }

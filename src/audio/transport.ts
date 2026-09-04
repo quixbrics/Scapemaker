@@ -5,10 +5,29 @@
  */
 
 import { getAudioContext, onFirstResume } from './context';
-import { buildGraph, type LiveGraph } from './graph';
+import { buildGraph, updateLiveMix, type LiveGraph } from './graph';
 import { assetStore } from './assetStore';
 import { store } from '../state/store';
-import { contentEnd } from '../state/project';
+import { contentEnd, type Project } from '../state/project';
+
+/**
+ * What the running graph's STRUCTURE depends on. If this changes mid-playback
+ * the graph must be rebuilt; anything else (a fader, mute, solo, pan, EQ or
+ * reverb value) can be patched onto the live nodes instead.
+ */
+function structuralSignature(project: Project): string {
+  return JSON.stringify(
+    project.tracks.map((t) => [
+      t.id,
+      t.clips.map((c) => [c.id, c.assetId, c.start, c.sourceOffset, c.duration, c.fadeIn, c.fadeOut, c.loop]),
+      t.automation.map((l) => [l.param, l.enabled, l.points]),
+      !!t.eq,
+      !!t.reverb,
+      t.reverb?.size,
+      t.reverb?.decay,
+    ]),
+  );
+}
 
 class Transport {
   private graph: LiveGraph | null = null;
@@ -16,9 +35,52 @@ class Transport {
   private startPlayhead = 0;
   private rafId = 0;
   private endTimer: ReturnType<typeof setTimeout> | null = null;
+  private structSig = '';
+
+  constructor() {
+    // Keep the running graph in step with edits, so mute/solo/faders take
+    // effect immediately and a moved clip is heard from its new position —
+    // both used to need a stop/start to be picked up.
+    store.subscribe((s, changed) => {
+      if (!changed.has('project') || !this.playing || !this.graph) return;
+      const sig = structuralSignature(s.project);
+      if (sig !== this.structSig) {
+        this.structSig = sig;
+        this.rebuildInPlace();
+      } else {
+        updateLiveMix(this.graph, s.project);
+      }
+    });
+  }
 
   get playing(): boolean {
     return store.get().transport.playing;
+  }
+
+  /** Tear down and rebuild the graph from the current playhead without stopping the clock. */
+  private rebuildInPlace(): void {
+    const ctx = getAudioContext();
+    const at = this.currentPosition();
+    const { project, transport } = store.get();
+    const end =
+      transport.looping && transport.loopEnd > transport.loopStart
+        ? transport.loopEnd
+        : Math.max(contentEnd(project), project.duration);
+
+    this.graph?.stop();
+    const timeOrigin = ctx.currentTime - at;
+    this.graph = buildGraph(ctx, project, (id) => assetStore.getBuffer(id), {
+      timeOrigin,
+      playFrom: at,
+      playTo: end,
+      withAnalyser: true,
+      destination: ctx.destination,
+    });
+    this.startCtxTime = ctx.currentTime;
+    this.startPlayhead = at;
+
+    if (this.endTimer) clearTimeout(this.endTimer);
+    this.endTimer = setTimeout(() => this.onReachedEnd(), Math.max(0, (end - at) * 1000));
   }
 
   play(): void {
@@ -56,6 +118,7 @@ class Transport {
 
     this.startCtxTime = ctx.currentTime + 0.06;
     this.startPlayhead = from;
+    this.structSig = structuralSignature(project);
     store.patchTransport({ playing: true });
 
     const stopAt = (end - from) * 1000;

@@ -86,8 +86,13 @@ type Source =
 export type ProgressFn = (fraction: number) => void;
 
 /** Fetch with byte-level progress when the server sends Content-Length; falls back to a plain fetch otherwise. */
-async function fetchWithProgress(url: string, title: string, onProgress?: ProgressFn): Promise<Blob> {
-  const res = await fetch(url);
+async function fetchWithProgress(
+  url: string,
+  title: string,
+  onProgress?: ProgressFn,
+  signal?: AbortSignal,
+): Promise<Blob> {
+  const res = await fetch(url, { signal });
   if (!res.ok) throw new Error(`Fetch failed (${res.status}) for ${title}`);
   const total = Number(res.headers.get('content-length') ?? 0);
   if (!onProgress || !res.body || !total) {
@@ -154,7 +159,12 @@ export class AssetStore {
    * native progress event) so the UI can show something better than a spinner
    * on a slow file.
    */
-  async acquire(ref: AssetRef, source: Source, onProgress?: ProgressFn): Promise<AssetEntry> {
+  async acquire(
+    ref: AssetRef,
+    source: Source,
+    onProgress?: ProgressFn,
+    signal?: AbortSignal,
+  ): Promise<AssetEntry> {
     const existing = this.entries.get(ref.id);
     if (existing) {
       this.refs.set(ref.id, (this.refs.get(ref.id) ?? 0) + 1);
@@ -166,7 +176,7 @@ export class AssetStore {
       return pending;
     }
 
-    const task = this.load(ref, source, onProgress);
+    const task = this.load(ref, source, onProgress, signal);
     this.inflight.set(ref.id, task);
     try {
       const entry = await task;
@@ -179,7 +189,12 @@ export class AssetStore {
     }
   }
 
-  private async load(ref: AssetRef, source: Source, onProgress?: ProgressFn): Promise<AssetEntry> {
+  private async load(
+    ref: AssetRef,
+    source: Source,
+    onProgress?: ProgressFn,
+    signal?: AbortSignal,
+  ): Promise<AssetEntry> {
     let arrayBuf: ArrayBuffer;
     let blobForCache: Blob | null = null;
 
@@ -194,7 +209,7 @@ export class AssetStore {
       arrayBuf = await source.blob.arrayBuffer();
       blobForCache = source.blob;
     } else {
-      const blob = await fetchWithProgress(source.url, ref.title, onProgress);
+      const blob = await fetchWithProgress(source.url, ref.title, onProgress, signal);
       arrayBuf = await blob.arrayBuffer();
       blobForCache = blob;
     }

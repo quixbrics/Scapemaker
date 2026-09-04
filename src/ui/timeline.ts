@@ -36,7 +36,7 @@ import { evaluateAt } from '../audio/automation';
 import { AUTOMATION_PARAMS, AUTOMATION_PARAM_LIST, toUnit, fromUnit } from './automationParams';
 import { loopSpan, type AutomationParam, type Clip, type Track } from '../state/project';
 import { dragLoopClip, loopCountForSpan } from '../state/edits';
-import { importResultToTimeline } from '../sources/importResult';
+import { importResultToTimeline, cancelImport } from '../sources/importResult';
 import { ASSET_DND_TYPE, SEARCH_RESULT_DND_TYPE } from './dnd';
 import type { SoundResult } from '../sources/types';
 
@@ -46,12 +46,15 @@ const CLIP_HEAD_H = 15;
 export class Timeline {
   readonly el: HTMLElement;
   private lanesScroll!: HTMLElement;
+  private lanesInner!: HTMLElement;
   private rulerTrack!: HTMLElement;
+  private rulerViewport!: HTMLElement;
   private playheadEl!: HTMLElement;
   private zoomInput!: HTMLInputElement;
   private countEl!: HTMLElement;
   private rafPlayhead = 0;
   private unsubTheme: () => void;
+  private lastSig = '';
 
   constructor() {
     this.el = h('div', { class: 'centre' });
@@ -59,19 +62,64 @@ export class Timeline {
     this.buildRuler();
     this.buildLanes();
     this.unsubTheme = onThemeChange(() => this.renderLanes(store.get()));
+    this.lastSig = this.laneSignature(store.get());
     store.subscribe((s, changed) => {
       if (changed.has('project') || changed.has('ui')) {
         this.renderToolbar(s);
-        this.renderRuler(s);
-        this.renderLanes(s);
+        // Only tear the lanes down when their STRUCTURE actually changed.
+        // Rebuilding on every ui patch detached the clip element mid-drag —
+        // onClipDown patches the selection on its first line, so the drag
+        // preview was updating a node that was no longer in the document
+        // (the move still landed on release, which is why it looked like
+        // "the outline doesn't work" rather than "dragging is broken").
+        const sig = this.laneSignature(s);
+        if (sig !== this.lastSig) {
+          this.lastSig = sig;
+          this.renderRuler(s);
+          this.renderLanes(s);
+        } else {
+          this.applySelection(s);
+        }
       } else if (changed.has('pendingImports')) {
-        // progress ticks arrive rapidly during a fetch — just the lanes, not
-        // the toolbar/ruler too.
+        this.lastSig = this.laneSignature(s);
         this.renderLanes(s);
       }
       if (changed.has('transport')) this.positionPlayhead(s);
     });
     this.loopPlayhead();
+  }
+
+  /**
+   * Everything a lane's DOM depends on EXCEPT the selection — if this is
+   * unchanged, a selection change is just a class swap.
+   */
+  private laneSignature(s: AppState): string {
+    return JSON.stringify({
+      d: s.project.duration,
+      z: s.project.view.zoom,
+      av: s.ui.automationView,
+      p: s.pendingImports.map((x) => [x.trackId, x.start, x.duration, x.phase, Math.round(x.fraction * 50)]),
+      t: s.project.tracks.map((t) => [
+        t.id,
+        t.name,
+        t.gain,
+        t.muted,
+        t.solo,
+        t.automation,
+        t.clips.map((c) => [c.id, c.assetId, c.start, c.duration, c.gain, c.fadeIn, c.fadeOut, c.loop]),
+      ]),
+    });
+  }
+
+  /** Selection-only update: swap classes in place, keep every node alive. */
+  private applySelection(s: AppState): void {
+    const { trackId, clipId } = s.ui.selection;
+    for (const lane of this.lanesScroll.querySelectorAll<HTMLElement>('.lane')) {
+      lane.classList.toggle('sel-track', lane.dataset.track === trackId);
+    }
+    for (const clipEl of this.lanesScroll.querySelectorAll<HTMLElement>('.clip')) {
+      clipEl.classList.toggle('sel', clipEl.dataset.clip === clipId);
+    }
   }
 
   dispose(): void {
@@ -153,32 +201,53 @@ export class Timeline {
     );
   }
 
+  // ---- geometry ----
+  /** Pixels per second — the zoom slider's actual unit. */
+  private pxPerSec(s: AppState): number {
+    return Math.max(0.5, s.project.view.zoom);
+  }
+  /** Width of the scrollable time content, in px. */
+  private contentWidth(s: AppState): number {
+    return Math.max(240, s.project.duration * this.pxPerSec(s));
+  }
+
   // ---- ruler ----
   private buildRuler(): void {
     this.rulerTrack = h('div', { class: 'ruler-track', onpointerdown: (e) => this.scrubFromRuler(e as PointerEvent) });
-    this.el.append(h('div', { class: 'ruler' }, h('div', { class: 'ruler-gutter' }), this.rulerTrack));
+    this.rulerViewport = h('div', { class: 'ruler-viewport' }, this.rulerTrack);
+    this.el.append(h('div', { class: 'ruler' }, h('div', { class: 'ruler-gutter' }), this.rulerViewport));
     this.renderRuler(store.get());
   }
 
-  private tickInterval(duration: number): number {
-    // aim for ~10-14 labels across the span
-    const targets = [1, 2, 5, 10, 15, 30, 60, 120, 300, 600];
-    for (const t of targets) if (duration / t <= 14) return t;
-    return 900;
+  /**
+   * Aim for ~10–14 labels across the VISIBLE span so ticks stay readable at any
+   * zoom, but never emit more than MAX_TICKS across the whole duration — at high
+   * zoom on a long project that would be thousands of nodes.
+   */
+  private tickInterval(s: AppState): number {
+    const MAX_TICKS = 240;
+    const visibleSeconds = (this.rulerViewport?.clientWidth || 800) / this.pxPerSec(s);
+    const targets = [0.5, 1, 2, 5, 10, 15, 30, 60, 120, 300, 600];
+    for (const t of targets) {
+      if (visibleSeconds / t <= 14 && s.project.duration / t <= MAX_TICKS) return t;
+    }
+    return Math.max(900, s.project.duration / MAX_TICKS);
   }
 
   private renderRuler(s: AppState): void {
     clear(this.rulerTrack);
     const dur = s.project.duration;
-    const step = this.tickInterval(dur);
+    const w = this.contentWidth(s);
+    this.rulerTrack.style.width = `${w}px`;
+    const step = this.tickInterval(s);
     for (let t = 0; t <= dur + 0.001; t += step) {
-      const pct = (t / dur) * 100;
+      const px = (t / dur) * w;
       this.rulerTrack.append(
-        h('div', { class: 'tick', style: `left:${pct}%` }),
-        h('div', { class: 'tick-label', style: `left:${pct}%` }, timecode(t, false)),
+        h('div', { class: 'tick', style: `left:${px}px` }),
+        h('div', { class: 'tick-label', style: `left:${px}px` }, timecode(t, false)),
       );
     }
-    this.playheadEl = h('div', { class: 'playhead', style: 'left:0%' });
+    this.playheadEl = h('div', { class: 'playhead', style: 'left:0px' });
     this.rulerTrack.append(this.playheadEl);
     this.positionPlayhead(s);
   }
@@ -191,7 +260,12 @@ export class Timeline {
 
   // ---- lanes ----
   private buildLanes(): void {
-    this.lanesScroll = h('div', { class: 'lanes-scroll' });
+    this.lanesInner = h('div', { class: 'lanes-inner' });
+    this.lanesScroll = h('div', { class: 'lanes-scroll' }, this.lanesInner);
+    // keep the ruler locked to the lanes' horizontal scroll
+    this.lanesScroll.addEventListener('scroll', () => {
+      if (this.rulerViewport) this.rulerViewport.scrollLeft = this.lanesScroll.scrollLeft;
+    });
     const wrap = h('div', { class: 'lanes-wrap' }, this.lanesScroll);
     this.el.append(wrap);
     this.buildMasterPlaceholder();
@@ -209,19 +283,23 @@ export class Timeline {
 
   private renderLanes(s: AppState): void {
     const scrollTop = this.lanesScroll.scrollTop;
-    clear(this.lanesScroll);
-    const pxPerSec = s.project.view.zoom;
-    const bodyWidth = () => this.lanesScroll.clientWidth - HEAD_W;
+    const scrollLeft = this.lanesScroll.scrollLeft;
+    clear(this.lanesInner);
+    const pxPerSec = this.pxPerSec(s);
+    const bodyW = this.contentWidth(s);
+    this.lanesInner.style.width = `${HEAD_W + bodyW}px`;
 
     for (const track of s.project.tracks) {
-      this.lanesScroll.append(this.renderLane(s, track, pxPerSec, bodyWidth()));
+      this.lanesInner.append(this.renderLane(s, track, pxPerSec, bodyW));
     }
 
     // playhead across lanes
     const ph = h('div', { class: 'playhead', style: `left:${HEAD_W}px` });
     ph.dataset.lanes = '1';
-    this.lanesScroll.append(ph);
+    this.lanesInner.append(ph);
     this.lanesScroll.scrollTop = scrollTop;
+    this.lanesScroll.scrollLeft = scrollLeft;
+    if (this.rulerViewport) this.rulerViewport.scrollLeft = scrollLeft;
     this.positionPlayhead(s);
   }
 
@@ -275,7 +353,7 @@ export class Timeline {
           ),
     );
 
-    const body = h('div', { class: 'lane-body' });
+    const body = h('div', { class: 'lane-body', style: `width:${bodyW}px` });
     body.addEventListener('pointerdown', (e) => this.onLaneBodyDown(e, track));
     body.addEventListener('dragover', (e) => e.preventDefault());
     body.addEventListener('drop', (e) => this.onLaneDrop(e as DragEvent, track));
@@ -447,7 +525,24 @@ export class Timeline {
     return h(
       'div',
       { class: 'clip pending', style: `left:${leftPct}%;width:${Math.max(widthPct, 6)}%` },
-      h('div', { class: 'clip-head' }, h('span', { class: 'c-name' }, pending.title)),
+      h(
+        'div',
+        { class: 'clip-head' },
+        h('span', { class: 'c-name' }, pending.title),
+        h(
+          'button',
+          {
+            class: 'pending-cancel',
+            ...tt('Cancel import', 'Stops the download and removes this placeholder.'),
+            onpointerdown: (e) => e.stopPropagation(),
+            onclick: (e) => {
+              e.stopPropagation();
+              cancelImport(pending.id);
+            },
+          },
+          '×',
+        ),
+      ),
       h('div', { class: 'pending-track' }, fill),
       h('div', { class: 'pending-label' }, pct != null ? `${phaseLabel} ${pct}%` : phaseLabel),
     );
@@ -605,7 +700,7 @@ export class Timeline {
 
   private snap(seconds: number): number {
     if (!store.get().ui.snap) return Math.max(0, seconds);
-    const step = this.tickInterval(store.get().project.duration) / 4;
+    const step = this.tickInterval(store.get()) / 4;
     return Math.max(0, Math.round(seconds / step) * step);
   }
 
@@ -688,13 +783,11 @@ export class Timeline {
   private positionPlayhead(s: AppState): void {
     const dur = s.project.duration || 1;
     const frac = Math.min(1, Math.max(0, s.transport.playhead / dur));
-    if (this.playheadEl) this.playheadEl.style.left = `${(frac * 100).toFixed(4)}%`;
-    if (!this.lanesScroll) return;
-    const laneHead = this.lanesScroll.querySelector<HTMLElement>('.playhead[data-lanes]');
-    if (laneHead) {
-      const bodyW = this.lanesScroll.clientWidth - HEAD_W;
-      laneHead.style.left = `${HEAD_W + frac * bodyW}px`;
-    }
+    const bodyW = this.contentWidth(s);
+    if (this.playheadEl) this.playheadEl.style.left = `${(frac * bodyW).toFixed(1)}px`;
+    if (!this.lanesInner) return;
+    const laneHead = this.lanesInner.querySelector<HTMLElement>('.playhead[data-lanes]');
+    if (laneHead) laneHead.style.left = `${(HEAD_W + frac * bodyW).toFixed(1)}px`;
   }
 
   private loopPlayhead(): void {

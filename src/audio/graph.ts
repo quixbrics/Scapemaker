@@ -53,8 +53,12 @@ export interface LiveGraph {
   stop(): void;
 }
 
-interface TrackChain {
+export interface TrackChain {
+  /** carries the track's gain in dB, and any gain automation */
   gain: GainNode;
+  /** purely 1 or 0 for mute/solo, kept separate so toggling it live never
+   *  fights a scheduled gain automation curve */
+  mute: GainNode;
   panner: StereoPannerNode;
   reverbWet: GainNode;
   /** low-shelf, 3x peaking, high-shelf — present only when track.eq exists */
@@ -94,14 +98,19 @@ export function buildGraph(
     const audible = !track.muted && (!anySolo || track.solo);
 
     const trackGain = ctx.createGain();
-    trackGain.gain.value = audible ? dbToGain(track.gain) : 0;
+    trackGain.gain.value = dbToGain(track.gain);
+
+    const muteGain = ctx.createGain();
+    muteGain.gain.value = audible ? 1 : 0;
 
     const panner = ctx.createStereoPanner();
     panner.pan.value = track.pan;
 
     // EQ (optional)
-    let headNode: AudioNode = trackGain;
+    const headNode: AudioNode = trackGain;
     let tailNode: AudioNode = trackGain;
+    tailNode.connect(muteGain);
+    tailNode = muteGain;
     let eqBands: BiquadFilterNode[] | undefined;
     if (track.eq) {
       const eq = buildEqChain(ctx, track.eq);
@@ -123,11 +132,12 @@ export function buildGraph(
       reverbWet = ctx.createGain(); // detached placeholder for automation targets
     }
 
-    const chain: TrackChain = { gain: trackGain, panner, reverbWet, eqBands };
+    const chain: TrackChain = { gain: trackGain, mute: muteGain, panner, reverbWet, eqBands };
     trackChains.set(track.id, chain);
 
-    // Automation — same scheduler as the offline path.
-    if (audible) scheduleTrackAutomation(track, chain, opts);
+    // Automation — same scheduler as the offline path. Always scheduled;
+    // mute/solo is handled by the separate mute node.
+    scheduleTrackAutomation(track, chain, opts);
 
     // Clips
     for (const clip of track.clips) {
@@ -149,6 +159,52 @@ export function buildGraph(
 
   return { master, analyser, sources, trackChains, stop };
 }
+
+/**
+ * Push mixer values onto an ALREADY-RUNNING graph, so mute, solo, a fader move
+ * or an EQ/reverb tweak is heard immediately instead of only after stopping and
+ * starting the transport. Structural changes (clips added/moved/trimmed) can't
+ * be patched this way — transport.ts rebuilds for those.
+ *
+ * A param carrying an active automation curve is left alone: the scheduled
+ * curve owns it, and stomping `.value` would fight it.
+ */
+export function updateLiveMix(graph: LiveGraph, project: Project): void {
+  const anySolo = project.tracks.some((t) => t.solo);
+  const ramp = 0.02; // short ramp so a fader move doesn't click
+
+  for (const track of project.tracks) {
+    const chain = graph.trackChains.get(track.id);
+    if (!chain) continue;
+    const now = chain.gain.context.currentTime;
+    const audible = !track.muted && (!anySolo || track.solo);
+
+    chain.mute.gain.setTargetAtTime(audible ? 1 : 0, now, ramp);
+
+    const automated = (param: string) =>
+      track.automation.some((l) => l.param === param && l.enabled && l.points.length > 0);
+
+    if (!automated('gain')) chain.gain.gain.setTargetAtTime(dbToGain(track.gain), now, ramp);
+    if (!automated('pan')) chain.panner.pan.setTargetAtTime(track.pan, now, ramp);
+
+    if (track.eq && chain.eqBands) {
+      track.eq.bands.forEach((band, i) => {
+        const filter = chain.eqBands![i];
+        if (!filter) return;
+        filter.frequency.value = band.frequency;
+        filter.Q.value = band.q;
+        if (!automated(EQ_PARAM_BY_INDEX[i])) {
+          filter.gain.setTargetAtTime(track.eq!.enabled ? band.gain : 0, now, ramp);
+        }
+      });
+    }
+    if (track.reverb && !automated('reverb.wet')) {
+      chain.reverbWet.gain.setTargetAtTime(track.reverb.enabled ? track.reverb.wet : 0, now, ramp);
+    }
+  }
+}
+
+const EQ_PARAM_BY_INDEX = ['eq.low', 'eq.lowMid', 'eq.mid', 'eq.highMid', 'eq.high'];
 
 function scheduleTrackAutomation(
   track: Track,
