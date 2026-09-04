@@ -1,0 +1,140 @@
+/*
+ * ScapeMaker design tokens — the ONLY place a colour is defined.
+ * Never hardcode a colour anywhere else in the codebase.
+ * Default theme is dark. Light is applied with [data-theme="light"] on <html>.
+ */
+
+:root {
+  /* 2.1 Surfaces and lines */
+  --bg: #0d1117;
+  --panel: #101720;
+  --inset: #0c1219;
+  --map-bg: #0b1016;
+  --raised: #1a242f;
+  --row-sel: #161f29;
+  --line: #1c2530;
+  --line-soft: #161e27;
+  --border: #22303d;
+  --border-ctl: #26333f;
+  --border-strong: #33404f;
+
+  /* 2.2 Text */
+  --text-strong: #e6eef6;
+  --text: #dce4ec;
+  --text-2: #b9c6d3;
+  --text-muted: #7b8b9c;
+  --text-faint: #7f90a1;
+  --text-dim: #6b7d8f;
+
+  /* 2.3 Accent and state */
+  --accent: #5ee0c0;
+  --accent-ink: #082019;
+  --accent-bg: #13282a;
+  --accent-border: #2c5c52;
+  --accent-text: #9ae7d3;
+  --warn: #ff8f6b;
+  --warn-bg: #221812;
+  --warn-border: #55372c;
+  --danger: #ff7a7a;
+  --danger-bg: #241315;
+  --danger-border: #6b2f2f;
+
+  /* 2.4 Track colours (hue + on-tint label colour) */
+  --track-1: #6ba8ff;
+  --track-1-label: #a9c9ee;
+  --track-2: #b48cf0;
+  --track-2-label: #cdb4f2;
+  --track-3: #5ee0c0;
+  --track-3-label: #9ae7d3;
+  --track-4: #ffc861;
+  --track-4-label: #f0d49a;
+  --track-5: #7b8b9c;
+  --track-5-label: #b9c6d3;
+  --track-6: #ff8f6b;
+  --track-6-label: #f5b39c;
+  --track-7: #8fd66f;
+  --track-7-label: #b6e3a1;
+  --track-8: #e08fc0;
+  --track-8-label: #eeb6d6;
+
+  /* clip tint alphas (2.4) */
+  --clip-body-alpha: 0.07;
+  --clip-header-alpha: 0.12;
+
+  /* tooltip chip — the only shadowed surface */
+  --tip-bg: #1c2531;
+  --tip-text: #e6eef6;
+  --tip-border: #33404f;
+  --tip-sub: #8b9bab;
+  --tip-shadow: 0 8px 22px rgba(0, 0, 0, 0.55);
+
+  /* 2.5 Type */
+  --font-ui: 'Space Grotesk', ui-sans-serif, system-ui, -apple-system, sans-serif;
+  --font-mono: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
+
+  /* 2.6 Geometry */
+  --radius-ctl: 4px;
+  --radius-tog: 2px;
+
+  color-scheme: dark;
+}
+
+:root[data-theme='light'] {
+  --bg: #f6f8fa;
+  --panel: #ffffff;
+  --inset: #f0f3f6;
+  --map-bg: #eef2f5;
+  --raised: #e6ecf2;
+  --row-sel: #e4f3ef;
+  --line: #dfe5ec;
+  --line-soft: #e8edf2;
+  --border: #d3dbe4;
+  --border-ctl: #ccd5df;
+  --border-strong: #b9c4d0;
+
+  --text-strong: #0f1720;
+  --text: #17202a;
+  --text-2: #3d4a57;
+  --text-muted: #5b6a78;
+  --text-faint: #65747f;
+  --text-dim: #71808d;
+
+  --accent: #0d8f78;
+  --accent-ink: #ffffff;
+  --accent-bg: #e0f2ee;
+  --accent-border: #93cfc0;
+  --accent-text: #0a6e5c;
+  --warn: #c2410c;
+  --warn-bg: #fdf0e8;
+  --warn-border: #f0c0a4;
+  --danger: #b91c1c;
+  --danger-bg: #fdecec;
+  --danger-border: #f0b4b4;
+
+  --track-1: #2f6fd0;
+  --track-1-label: #24549e;
+  --track-2: #7e4fc4;
+  --track-2-label: #673aa8;
+  --track-3: #0d8f78;
+  --track-3-label: #0a6e5c;
+  --track-4: #a9720a;
+  --track-4-label: #7d5405;
+  --track-5: #5b6a78;
+  --track-5-label: #3d4a57;
+  --track-6: #c2410c;
+  --track-6-label: #a83d16;
+  --track-7: #4a8f2b;
+  --track-7-label: #356b1f;
+  --track-8: #a83d7d;
+  --track-8-label: #7d2c5c;
+
+  --clip-body-alpha: 0.1;
+  --clip-header-alpha: 0.12;
+
+  --tip-bg: #1b2430;
+  --tip-text: #e6eef6;
+  --tip-border: #33404f;
+  --tip-sub: #b7c2cd;
+
+  color-scheme: light;
+}

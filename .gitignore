@@ -1,0 +1,14 @@
+# dependencies / build output
+node_modules/
+dist/
+.vite/
+coverage/
+
+# local tooling and archived material (kept on disk, out of the repo)
+.claude/
+archive/
+
+# OS / editor cruft
+.DS_Store
+*.local
+*.log
