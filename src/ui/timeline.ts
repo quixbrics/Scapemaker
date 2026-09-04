@@ -81,7 +81,7 @@ export class Timeline {
         } else if (sig !== this.lastSig) {
           // mid-gesture (a fader drag): the control updates its own readout;
           // rebuild once the pointer is released.
-          onGestureEnd(() => {
+          onGestureEnd('timeline:lanes', () => {
             const now = store.get();
             this.lastSig = this.laneSignature(now);
             this.renderRuler(now);

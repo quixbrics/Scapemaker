@@ -38,7 +38,7 @@ export class Inspector {
       // replace the slider under the pointer. Controls update their own
       // readouts, so just defer the rebuild until the gesture ends.
       if (isInteracting()) {
-        onGestureEnd(() => this.render(store.get()));
+        onGestureEnd('inspector', () => this.render(store.get()));
         return;
       }
       this.render(s);

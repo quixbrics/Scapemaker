@@ -10,16 +10,24 @@
  */
 
 let gestures = 0;
-const listeners = new Set<() => void>();
+/**
+ * Keyed so a panel asking on every input event of a drag queues ONE rebuild,
+ * not one per event — a long fader drag would otherwise fire hundreds of full
+ * re-renders the moment the pointer came up.
+ */
+const pending = new Map<string, () => void>();
 
 export function isInteracting(): boolean {
   return gestures > 0;
 }
 
-/** Run `fn` once the current gesture finishes (or immediately if idle). */
-export function onGestureEnd(fn: () => void): void {
+/**
+ * Run `fn` once the current gesture finishes (or immediately if idle).
+ * Repeat calls with the same `key` replace the previous one.
+ */
+export function onGestureEnd(key: string, fn: () => void): void {
   if (gestures === 0) fn();
-  else listeners.add(fn);
+  else pending.set(key, fn);
 }
 
 export function installInteractionGuard(): void {
@@ -34,8 +42,9 @@ export function installInteractionGuard(): void {
   const end = () => {
     if (gestures === 0) return;
     gestures = 0;
-    for (const fn of listeners) fn();
-    listeners.clear();
+    const fns = [...pending.values()];
+    pending.clear();
+    for (const fn of fns) fn();
   };
   window.addEventListener('pointerup', end, true);
   window.addEventListener('pointercancel', end, true);
