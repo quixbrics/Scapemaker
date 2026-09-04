@@ -5,6 +5,7 @@
  */
 
 import { store, type AppState, type PendingImport } from '../state/store';
+import { isInteracting, onGestureEnd } from './interaction';
 import { transport } from '../audio/transport';
 import { assetStore } from '../audio/assetStore';
 import { drawWaveform } from './waveform';
@@ -73,10 +74,19 @@ export class Timeline {
         // (the move still landed on release, which is why it looked like
         // "the outline doesn't work" rather than "dragging is broken").
         const sig = this.laneSignature(s);
-        if (sig !== this.lastSig) {
+        if (sig !== this.lastSig && !isInteracting()) {
           this.lastSig = sig;
           this.renderRuler(s);
           this.renderLanes(s);
+        } else if (sig !== this.lastSig) {
+          // mid-gesture (a fader drag): the control updates its own readout;
+          // rebuild once the pointer is released.
+          onGestureEnd(() => {
+            const now = store.get();
+            this.lastSig = this.laneSignature(now);
+            this.renderRuler(now);
+            this.renderLanes(now);
+          });
         } else {
           this.applySelection(s);
         }
@@ -128,26 +138,30 @@ export class Timeline {
   }
 
   // ---- toolbar ----
+  // Built ONCE. Rebuilding it on every store change replaced the zoom slider
+  // on its own first input event, so a zoom drag died after one step.
   private toolbar!: HTMLElement;
+  private toolButtons = new Map<string, HTMLElement>();
+  private snapBtn!: HTMLElement;
+
   private buildToolbar(): void {
     this.toolbar = h('div', { class: 'tl-toolbar' });
     this.el.append(this.toolbar);
-    this.renderToolbar(store.get());
-  }
 
-  private renderToolbar(s: AppState): void {
-    clear(this.toolbar);
-    const tool = s.ui.tool;
-    const mk = (id: string, icon: string, title: string, sub: string) =>
-      h(
+    const s = store.get();
+    const mk = (id: string, icon: string, title: string, sub: string) => {
+      const btn = h(
         'button',
         {
-          class: `tool${tool === id ? ' active' : ''}`,
+          class: 'tool',
           ...tt(title, sub),
           onclick: () => store.patchUi({ tool: id as AppState['ui']['tool'] }),
         },
         svgIcon(icon, 15),
       );
+      this.toolButtons.set(id, btn);
+      return btn;
+    };
 
     const group = h(
       'div',
@@ -159,19 +173,17 @@ export class Timeline {
       mk('loop', 'c-loop', 'Loop', 'Drag a clip’s edge to repeat it for as long as you drag — R'),
     );
 
-    const snap = h(
+    this.snapBtn = h(
       'button',
       {
-        class: `toggle${s.ui.snap ? ' on' : ''}`,
+        class: 'toggle',
         ...tt('Snap to grid', 'Clips land on ruler divisions while dragging.'),
-        onclick: () => store.patchUi({ snap: !s.ui.snap }),
+        onclick: () => store.patchUi({ snap: !store.get().ui.snap }),
       },
       h('span', { class: 'knob' }),
     );
 
-    const nEmpty = s.project.tracks.filter((t) => t.clips.length).length;
-    const nClips = s.project.tracks.reduce((n, t) => n + t.clips.length, 0);
-    this.countEl = h('span', { class: 'mono-cap' }, `${nEmpty} OF ${s.project.tracks.length} TRACKS · ${nClips} CLIPS`);
+    this.countEl = h('span', { class: 'mono-cap' });
 
     this.zoomInput = h('input', {
       type: 'range',
@@ -179,6 +191,7 @@ export class Timeline {
       max: '40',
       step: '1',
       value: String(s.project.view.zoom),
+      ...tt('Zoom', 'Pixels per second. The timeline scrolls horizontally when it no longer fits.'),
       oninput: (e) => {
         const zoom = Number((e.target as HTMLInputElement).value);
         store.mutateProject((p) => (p.view.zoom = zoom), { markDirty: false });
@@ -188,7 +201,7 @@ export class Timeline {
     this.toolbar.append(
       group,
       h('div', { class: 'vrule' }),
-      snap,
+      this.snapBtn,
       h('span', { class: 'mini-label' }, 'Snap'),
       h('div', { class: 'spacer' }),
       this.countEl,
@@ -199,6 +212,20 @@ export class Timeline {
         svgIcon('c-plus', 14),
       ),
     );
+    this.renderToolbar(s);
+  }
+
+  /** In-place patch only — never replaces a node. */
+  private renderToolbar(s: AppState): void {
+    for (const [id, btn] of this.toolButtons) btn.classList.toggle('active', s.ui.tool === id);
+    this.snapBtn.classList.toggle('on', s.ui.snap);
+    const nEmpty = s.project.tracks.filter((t) => t.clips.length).length;
+    const nClips = s.project.tracks.reduce((n, t) => n + t.clips.length, 0);
+    this.countEl.textContent = `${nEmpty} OF ${s.project.tracks.length} TRACKS · ${nClips} CLIPS`;
+    // don't fight the user's own drag
+    if (document.activeElement !== this.zoomInput && !isInteracting()) {
+      this.zoomInput.value = String(s.project.view.zoom);
+    }
   }
 
   // ---- geometry ----
@@ -348,8 +375,10 @@ export class Timeline {
               'S',
             ),
             autoToggle,
-            this.gainSlider(track),
-            h('span', { class: 'h-db' }, fmtDb(track.gain)),
+            ...(() => {
+              const db = h('span', { class: 'h-db' }, fmtDb(track.gain));
+              return [this.gainSlider(track, db), db];
+            })(),
           ),
     );
 
@@ -484,23 +513,29 @@ export class Timeline {
     return overlay;
   }
 
-  private gainSlider(track: Track): HTMLElement {
-    const pct = ((track.gain + 60) / 66) * 100; // -60..+6 dB
-    const wrap = h(
+  private gainSlider(track: Track, dbReadout: HTMLElement): HTMLElement {
+    const toPct = (db: number) => Math.max(0, Math.min(100, ((db + 60) / 66) * 100)); // -60..+6 dB
+    const fill = h('span', { class: 'fill', style: `width:${toPct(track.gain)}%` });
+    return h(
       'div',
       { class: 'h-slider' },
-      h('span', { class: 'fill', style: `width:${Math.max(0, Math.min(100, pct))}%` }),
+      fill,
       h('input', {
         type: 'range',
         min: '-60',
         max: '6',
         step: '0.5',
         value: String(track.gain),
-        oninput: (e) => setTrackGain(track.id, Number((e.target as HTMLInputElement).value)),
+        oninput: (e) => {
+          const db = Number((e.target as HTMLInputElement).value);
+          // update our own readout so the lane doesn't need rebuilding mid-drag
+          fill.style.width = `${toPct(db)}%`;
+          dbReadout.textContent = fmtDb(db);
+          setTrackGain(track.id, db);
+        },
         onpointerdown: (e) => e.stopPropagation(),
       }),
     );
-    return wrap;
   }
 
   /**

@@ -7,6 +7,7 @@ import { transport } from '../audio/transport';
 import { h } from './dom';
 import { installIconSheet } from './icons';
 import { installTooltips } from './tooltip';
+import { installInteractionGuard } from './interaction';
 import { TopBar } from './topbar';
 import { Discovery } from './discovery';
 import { Timeline } from './timeline';
@@ -20,6 +21,7 @@ import { saveProjectToFile, scheduleAutosave } from '../state/persist';
 export function mountApp(root: HTMLElement): void {
   installIconSheet();
   installTooltips();
+  installInteractionGuard();
 
   const topbar = new TopBar();
   const discovery = new Discovery();

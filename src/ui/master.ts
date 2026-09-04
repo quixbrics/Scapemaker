@@ -6,6 +6,7 @@
  */
 
 import { store } from '../state/store';
+import { isInteracting } from './interaction';
 import { transport } from '../audio/transport';
 import { renderProject } from '../audio/render';
 import { analyseBuffer, readLiveMeter, type BufferAnalysis } from '../audio/analysis';
@@ -59,7 +60,16 @@ export class MasterStrip {
     }
     if (this.analysing) return;
     this.analysing = true;
+    // A full offline render is expensive; hold off while the mix is playing or
+    // the user is dragging something, so it never competes with the audio
+    // thread or a gesture.
     window.setTimeout(async () => {
+      if (store.get().transport.playing || isInteracting()) {
+        this.analysing = false;
+        this.lastSig = '';           // re-check once things settle
+        setTimeout(() => this.scheduleAnalysis(), 600);
+        return;
+      }
       try {
         const buf = await renderProject(store.get().project, {});
         this.analysis = analyseBuffer(buf);

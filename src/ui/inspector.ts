@@ -6,6 +6,7 @@
  */
 
 import { store, type AppState } from '../state/store';
+import { isInteracting, onGestureEnd } from './interaction';
 import { clear, h, fmtDb } from './dom';
 import { tt } from './tooltip';
 import { licenceName, licenceShort, licenceTone, ALL_LICENCE_IDS, makeLicence } from '../licence/model';
@@ -32,7 +33,15 @@ export class Inspector {
     this.el = h('div', { class: 'panel-right scroll' });
     this.render(store.get());
     store.subscribe((s, changed) => {
-      if (changed.has('ui') || changed.has('project')) this.render(s);
+      if (!changed.has('ui') && !changed.has('project')) return;
+      // A slider's oninput mutates the project; re-rendering here would
+      // replace the slider under the pointer. Controls update their own
+      // readouts, so just defer the rebuild until the gesture ends.
+      if (isInteracting()) {
+        onGestureEnd(() => this.render(store.get()));
+        return;
+      }
+      this.render(s);
     });
   }
 
@@ -99,18 +108,40 @@ export class Inspector {
       h(
         'div',
         { class: 'insp-section' },
-        sliderRow('Clip gain', `${fmtDb(clip.gain)} dB`, clip.gain, -40, 12, 0.5, (v) =>
-          store.mutateProject((p) => {
-            const c = p.tracks.find((t) => t.id === track.id)?.clips.find((x) => x.id === clip.id);
-            if (c) c.gain = v;
-          }),
+        sliderRow(
+          'Clip gain',
+          `${fmtDb(clip.gain)} dB`,
+          clip.gain,
+          -40,
+          12,
+          0.5,
+          (v) =>
+            store.mutateProject((p) => {
+              const c = p.tracks.find((t) => t.id === track.id)?.clips.find((x) => x.id === clip.id);
+              if (c) c.gain = v;
+            }),
+          (v) => `${fmtDb(v)} dB`,
         ),
-        sliderRow('Fade in', `${clip.fadeIn.duration.toFixed(2)} s`, clip.fadeIn.duration, 0, 6, 0.05, (v) =>
-          setClipFade(track.id, clip.id, 'fadeIn', v),
+        sliderRow(
+          'Fade in',
+          `${clip.fadeIn.duration.toFixed(2)} s`,
+          clip.fadeIn.duration,
+          0,
+          6,
+          0.05,
+          (v) => setClipFade(track.id, clip.id, 'fadeIn', v),
+          (v) => `${v.toFixed(2)} s`,
         ),
         this.fadeCurvePick(track.id, clip.id, 'fadeIn', clip.fadeIn.curve),
-        sliderRow('Fade out', `${clip.fadeOut.duration.toFixed(2)} s`, clip.fadeOut.duration, 0, 6, 0.05, (v) =>
-          setClipFade(track.id, clip.id, 'fadeOut', v),
+        sliderRow(
+          'Fade out',
+          `${clip.fadeOut.duration.toFixed(2)} s`,
+          clip.fadeOut.duration,
+          0,
+          6,
+          0.05,
+          (v) => setClipFade(track.id, clip.id, 'fadeOut', v),
+          (v) => `${v.toFixed(2)} s`,
         ),
         this.fadeCurvePick(track.id, clip.id, 'fadeOut', clip.fadeOut.curve),
         sliderRow(
@@ -121,6 +152,7 @@ export class Inspector {
           16,
           1,
           (v) => setClipLoop(track.id, clip.id, v, clip.loop?.crossfade ?? 0.05),
+          (v) => String(v),
         ),
       ),
     );
@@ -214,6 +246,7 @@ export class Inspector {
               18,
               0.5,
               (v) => setEqBand(track.id, i, { gain: v }),
+              (v) => `${v > 0 ? '+' : ''}${v.toFixed(1)} dB`,
             ),
           )
         : []),
@@ -282,14 +315,26 @@ export class Inspector {
           h('option', { value: 'custom', selected: presetKey === 'custom', disabled: true }, 'Custom'),
         ),
       ),
-      sliderRow('Size', `${Math.round((rv?.size ?? 0.34) * 100)}%`, rv?.size ?? 0.34, 0, 1, 0.01, (v) =>
-        setReverbParam(track.id, { size: v }),
+      sliderRow(
+        'Size',
+        `${Math.round((rv?.size ?? 0.34) * 100)}%`,
+        rv?.size ?? 0.34, 0, 1, 0.01,
+        (v) => setReverbParam(track.id, { size: v }),
+        (v) => `${Math.round(v * 100)}%`,
       ),
-      sliderRow('Decay', `${(rv?.decay ?? 0.9).toFixed(1)} s`, rv?.decay ?? 0.9, 0.1, 6, 0.1, (v) =>
-        setReverbParam(track.id, { decay: v }),
+      sliderRow(
+        'Decay',
+        `${(rv?.decay ?? 0.9).toFixed(1)} s`,
+        rv?.decay ?? 0.9, 0.1, 6, 0.1,
+        (v) => setReverbParam(track.id, { decay: v }),
+        (v) => `${v.toFixed(1)} s`,
       ),
-      sliderRow('Wet', `${Math.round((rv?.wet ?? 0.18) * 100)}%`, rv?.wet ?? 0.18, 0, 1, 0.01, (v) =>
-        setReverbParam(track.id, { wet: v }),
+      sliderRow(
+        'Wet',
+        `${Math.round((rv?.wet ?? 0.18) * 100)}%`,
+        rv?.wet ?? 0.18, 0, 1, 0.01,
+        (v) => setReverbParam(track.id, { wet: v }),
+        (v) => `${Math.round(v * 100)}%`,
       ),
     );
   }
@@ -299,6 +344,11 @@ function kv(k: string, v: string, mono = false): HTMLElement {
   return h('div', { class: 'kv' }, h('span', { class: 'k' }, k), h('span', { class: `v${mono ? ' mono' : ''}` }, v));
 }
 
+/**
+ * `format` lets the row update its OWN readout on input. Without it the panel
+ * had to re-render to show the new number, which replaced the slider being
+ * dragged and killed the gesture after one step.
+ */
 function sliderRow(
   label: string,
   valueText: string,
@@ -307,18 +357,24 @@ function sliderRow(
   max: number,
   step: number,
   onInput: (v: number) => void,
+  format?: (v: number) => string,
 ): HTMLElement {
+  const valEl = h('span', { class: 'sr-val' }, valueText);
   return h(
     'div',
     { class: 'slider-row' },
-    h('div', { class: 'sr-h' }, h('span', {}, label), h('span', { class: 'sr-val' }, valueText)),
+    h('div', { class: 'sr-h' }, h('span', {}, label), valEl),
     h('input', {
       type: 'range',
       min: String(min),
       max: String(max),
       step: String(step),
       value: String(value),
-      oninput: (e) => onInput(Number((e.target as HTMLInputElement).value)),
+      oninput: (e) => {
+        const v = Number((e.target as HTMLInputElement).value);
+        if (format) valEl.textContent = format(v);
+        onInput(v);
+      },
     }),
   );
 }
