@@ -82,6 +82,31 @@ type Source =
   | { kind: 'url'; url: string }
   | { kind: 'arrayBuffer'; data: ArrayBuffer };
 
+/** 0..1 while fetching; -1 once fetch is done and decode has started (no native decode progress). */
+export type ProgressFn = (fraction: number) => void;
+
+/** Fetch with byte-level progress when the server sends Content-Length; falls back to a plain fetch otherwise. */
+async function fetchWithProgress(url: string, title: string, onProgress?: ProgressFn): Promise<Blob> {
+  const res = await fetch(url);
+  if (!res.ok) throw new Error(`Fetch failed (${res.status}) for ${title}`);
+  const total = Number(res.headers.get('content-length') ?? 0);
+  if (!onProgress || !res.body || !total) {
+    return res.blob();
+  }
+
+  const reader = res.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let received = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    chunks.push(value);
+    received += value.length;
+    onProgress(Math.min(1, received / total));
+  }
+  return new Blob(chunks as BlobPart[]);
+}
+
 export class AssetStore {
   private entries = new Map<AssetId, AssetEntry>();
   private refs = new Map<AssetId, number>();
@@ -124,9 +149,12 @@ export class AssetStore {
   /**
    * Ensure an asset is decoded and cached. Increments the ref count.
    * Deduplicates concurrent calls for the same id. `source` is only used on a
-   * cache miss — pass the freshest way to obtain the bytes.
+   * cache miss — pass the freshest way to obtain the bytes. `onProgress`
+   * reports fetch progress (0..1, or -1 once decoding starts — decode has no
+   * native progress event) so the UI can show something better than a spinner
+   * on a slow file.
    */
-  async acquire(ref: AssetRef, source: Source): Promise<AssetEntry> {
+  async acquire(ref: AssetRef, source: Source, onProgress?: ProgressFn): Promise<AssetEntry> {
     const existing = this.entries.get(ref.id);
     if (existing) {
       this.refs.set(ref.id, (this.refs.get(ref.id) ?? 0) + 1);
@@ -138,7 +166,7 @@ export class AssetStore {
       return pending;
     }
 
-    const task = this.load(ref, source);
+    const task = this.load(ref, source, onProgress);
     this.inflight.set(ref.id, task);
     try {
       const entry = await task;
@@ -151,7 +179,7 @@ export class AssetStore {
     }
   }
 
-  private async load(ref: AssetRef, source: Source): Promise<AssetEntry> {
+  private async load(ref: AssetRef, source: Source, onProgress?: ProgressFn): Promise<AssetEntry> {
     let arrayBuf: ArrayBuffer;
     let blobForCache: Blob | null = null;
 
@@ -166,13 +194,12 @@ export class AssetStore {
       arrayBuf = await source.blob.arrayBuffer();
       blobForCache = source.blob;
     } else {
-      const res = await fetch(source.url);
-      if (!res.ok) throw new Error(`Fetch failed (${res.status}) for ${ref.title}`);
-      const blob = await res.blob();
+      const blob = await fetchWithProgress(source.url, ref.title, onProgress);
       arrayBuf = await blob.arrayBuffer();
       blobForCache = blob;
     }
 
+    onProgress?.(-1); // decodeAudioData has no progress event
     // decodeAudioData detaches the ArrayBuffer — clone for safety.
     const ctx = getAudioContext();
     let buffer: AudioBuffer;

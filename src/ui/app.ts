@@ -40,6 +40,11 @@ export function mountApp(root: HTMLElement): void {
   store.subscribe((_s, changed) => {
     if (changed.has('project')) scheduleAutosave();
   });
+
+  // never two things playing at once: starting the mix silences any Discovery preview
+  store.subscribe((s, changed) => {
+    if (changed.has('transport') && s.transport.playing) discovery.stopPreview();
+  });
 }
 
 function wireKeyboard(): void {

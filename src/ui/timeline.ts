@@ -4,7 +4,7 @@
  * pointer interaction: select, move, trim, split, duplicate, delete, with snap.
  */
 
-import { store, type AppState } from '../state/store';
+import { store, type AppState, type PendingImport } from '../state/store';
 import { transport } from '../audio/transport';
 import { assetStore } from '../audio/assetStore';
 import { drawWaveform } from './waveform';
@@ -59,6 +59,10 @@ export class Timeline {
       if (changed.has('project') || changed.has('ui')) {
         this.renderToolbar(s);
         this.renderRuler(s);
+        this.renderLanes(s);
+      } else if (changed.has('pendingImports')) {
+        // progress ticks arrive rapidly during a fetch — just the lanes, not
+        // the toolbar/ruler too.
         this.renderLanes(s);
       }
       if (changed.has('transport')) this.positionPlayhead(s);
@@ -274,6 +278,9 @@ export class Timeline {
     for (const clip of track.clips) {
       body.append(this.renderClip(s, track, clip, pxPerSec, bodyW));
     }
+    for (const pending of s.pendingImports) {
+      if (pending.trackId === track.id) body.append(this.renderPendingClip(s, pending));
+    }
     if (auto) body.append(this.automationOverlay(s, track, auto.param));
 
     const lane = h(
@@ -411,6 +418,34 @@ export class Timeline {
       }),
     );
     return wrap;
+  }
+
+  /**
+   * Placeholder shown where an import will land while it resolves, fetches
+   * and decodes — so a slow file reads as "in progress here", not "did my
+   * click even register". Removed the instant the real clip appears.
+   */
+  private renderPendingClip(s: AppState, pending: PendingImport): HTMLElement {
+    const dur = s.project.duration || 1;
+    const leftPct = (pending.start / dur) * 100;
+    const widthPct = (pending.duration / dur) * 100;
+
+    const phaseLabel =
+      pending.phase === 'resolving' ? 'Locating file…' : pending.phase === 'decoding' ? 'Decoding…' : 'Fetching…';
+    const pct = pending.fraction >= 0 ? Math.round(pending.fraction * 100) : null;
+
+    const fill = h('div', {
+      class: `pending-fill${pct == null ? ' indeterminate' : ''}`,
+      style: pct != null ? `width:${pct}%` : '',
+    });
+
+    return h(
+      'div',
+      { class: 'clip pending', style: `left:${leftPct}%;width:${Math.max(widthPct, 6)}%` },
+      h('div', { class: 'clip-head' }, h('span', { class: 'c-name' }, pending.title)),
+      h('div', { class: 'pending-track' }, fill),
+      h('div', { class: 'pending-label' }, pct != null ? `${phaseLabel} ${pct}%` : phaseLabel),
+    );
   }
 
   private renderClip(
@@ -562,16 +597,18 @@ export class Timeline {
             ? 'trim-end'
             : 'move';
 
+    const clipEl = e.currentTarget as HTMLElement;
     const move = (ev: PointerEvent) => {
       const dxSec = (ev.clientX - startX) / pxPerSec;
       if (mode === 'move') {
-        const ghost = e.currentTarget as HTMLElement;
-        ghost.style.left = `${((this.snap(originStart + dxSec) / dur) * 100).toFixed(3)}%`;
+        if (Math.abs(ev.clientX - startX) >= 3) clipEl.classList.add('dragging');
+        clipEl.style.left = `${((this.snap(originStart + dxSec) / dur) * 100).toFixed(3)}%`;
       }
     };
     const up = (ev: PointerEvent) => {
       window.removeEventListener('pointermove', move);
       window.removeEventListener('pointerup', up);
+      clipEl.classList.remove('dragging');
       const dxSec = (ev.clientX - startX) / pxPerSec;
       if (Math.abs(ev.clientX - startX) < 3 && mode === 'move') return; // pure click
       if (mode === 'move' && tool === 'crossfade') {

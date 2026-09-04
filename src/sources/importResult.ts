@@ -2,6 +2,12 @@
  * Turn a SoundResult (any of the four sources) into a placed clip with a full
  * attribution record. Handles the restricted-licence warning gate and records
  * the decision.
+ *
+ * The whole path — resolving a playable URL, fetching it, decoding it — can
+ * take a visible moment for a large field recording. A PendingImport is
+ * registered on the store for the duration so the timeline can show exactly
+ * where the clip is landing and how far along it is, instead of leaving the
+ * student staring at nothing and clicking again.
  */
 
 import { assetStore } from '../audio/assetStore';
@@ -12,7 +18,7 @@ import { resolveArchiveAudio } from './archive';
 import type { SoundResult } from './types';
 import type { AssetRef } from '../state/project';
 import { confirmRestrictedImport } from '../ui/dialogs/licenceWarning';
-import { contentEnd } from '../state/project';
+import { contentEnd, uid } from '../state/project';
 
 function refFromResult(r: SoundResult, downloadUrl?: string): AssetRef {
   return {
@@ -39,47 +45,72 @@ export interface ImportOutcome {
   reason?: string;
 }
 
+/** Fallback width for the placeholder when the source gives no duration up front (archive/aporee — Freesound does). */
+const UNKNOWN_DURATION_ESTIMATE = 8;
+
 export async function importResultToTimeline(
   result: SoundResult,
   opts: { trackId?: string; start?: number } = {},
 ): Promise<ImportOutcome> {
-  // restricted-licence gate
+  // restricted-licence gate — before any placeholder, since this is a modal decision
   if (isRestrictive(result.licence) || result.licence.id === 'unknown') {
     const proceed = await confirmRestrictedImport(result.licence, result.title);
     if (!proceed) return { ok: false, reason: 'cancelled' };
   }
 
-  // resolve a fetchable URL
-  let downloadUrl = result.previewUrl;
-  if (!downloadUrl && (result.source === 'archive' || result.source === 'aporee') && result.nativeId) {
-    const file = await resolveArchiveAudio(result.nativeId).catch(() => null);
-    if (file) downloadUrl = file.url;
-  }
-  if (!downloadUrl) {
-    return {
-      ok: false,
-      reason:
-        result.source === 'freesound'
-          ? 'No preview available. Download the file from freesound.org and drag it in — the credit is still captured.'
-          : 'Could not find a playable file for this item.',
-    };
-  }
-
-  const ref = refFromResult(result, downloadUrl);
   const p = store.get().project;
   const trackId = opts.trackId ?? p.tracks.find((t) => t.clips.length === 0)?.id ?? p.tracks[0]?.id;
   if (!trackId) return { ok: false, reason: 'No track to place on.' };
   const start = opts.start ?? contentEnd(p);
 
-  try {
-    await assetStore.acquire(ref, { kind: 'url', url: downloadUrl });
-  } catch (err) {
-    return { ok: false, reason: err instanceof Error ? err.message : 'Fetch/decode failed.' };
-  }
+  const pendingId = uid('pending');
+  store.addPendingImport({
+    id: pendingId,
+    trackId,
+    start,
+    duration: result.duration || UNKNOWN_DURATION_ESTIMATE,
+    title: result.title,
+    phase: 'resolving',
+    fraction: -1,
+  });
 
-  placeAsset(ref, trackId, start);
-  if (isRestrictive(ref.licence) || ref.licence.id === 'unknown') acknowledgeRestriction(ref.id);
-  return { ok: true };
+  try {
+    // resolve a fetchable URL — the slow, invisible step on archive/aporee
+    let downloadUrl = result.previewUrl;
+    if (!downloadUrl && (result.source === 'archive' || result.source === 'aporee') && result.nativeId) {
+      const file = await resolveArchiveAudio(result.nativeId).catch(() => null);
+      if (file) downloadUrl = file.url;
+    }
+    if (!downloadUrl) {
+      return {
+        ok: false,
+        reason:
+          result.source === 'freesound'
+            ? 'No preview available. Download the file from freesound.org and drag it in — the credit is still captured.'
+            : 'Could not find a playable file for this item.',
+      };
+    }
+
+    const ref = refFromResult(result, downloadUrl);
+
+    store.updatePendingImport(pendingId, { phase: 'fetching', fraction: 0 });
+    try {
+      await assetStore.acquire(ref, { kind: 'url', url: downloadUrl }, (fraction) => {
+        store.updatePendingImport(pendingId, {
+          phase: fraction < 0 ? 'decoding' : 'fetching',
+          fraction,
+        });
+      });
+    } catch (err) {
+      return { ok: false, reason: err instanceof Error ? err.message : 'Fetch/decode failed.' };
+    }
+
+    placeAsset(ref, trackId, start);
+    if (isRestrictive(ref.licence) || ref.licence.id === 'unknown') acknowledgeRestriction(ref.id);
+    return { ok: true };
+  } finally {
+    store.removePendingImport(pendingId);
+  }
 }
 
 /** Import a local file's AssetRef (already decoded) onto the timeline. */

@@ -1,6 +1,15 @@
 /*
  * Top bar (UI spec §4.1): brand · project · saved | transport | timecode |
  * theme switch · Basic/Advanced · licence-warning chip · Export.
+ *
+ * IMPORTANT: the playhead patches the store on every animation frame while
+ * playing. A full clear()+rebuild on every 'transport' change used to replace
+ * the Play/Stop buttons under the pointer ~60 times a second, so a click's
+ * mousedown and mouseup landed on two different (one of them detached) DOM
+ * nodes and the browser never fired `click` at all — the buttons looked dead
+ * while audio kept running. Fix: build the transport controls ONCE and only
+ * ever patch their class/text in place; `render()` (full rebuild) responds
+ * only to 'ui'/'project' changes.
  */
 
 import { store, type AppState } from '../state/store';
@@ -17,29 +26,30 @@ import { openProjectFile } from './dialogs/openProject';
 export class TopBar {
   readonly el: HTMLElement;
 
+  private playBtn!: HTMLButtonElement;
+  private playIcon!: SVGSVGElement;
+  private loopBtn!: HTMLButtonElement;
+  private tcMain!: HTMLElement;
+  private tcFrac!: HTMLElement;
+  private tcTotal!: HTMLElement;
+
   constructor() {
     this.el = h('div', { class: 'topbar' });
     this.render(store.get());
+    this.updateTransport(store.get());
     store.subscribe((s, changed) => {
-      if (changed.has('ui') || changed.has('project') || changed.has('transport')) this.render(s);
+      if (changed.has('ui') || changed.has('project')) this.render(s);
+      if (changed.has('transport')) this.updateTransport(s);
     });
   }
 
+  /** Full rebuild — only for structural (ui/project) changes, never per-frame. */
   private render(s: AppState): void {
     clear(this.el);
-    const t = s.transport;
 
-    const brand = h(
-      'div',
-      { class: 'brand' },
-      svgIcon('c-wave', 16),
-      h('span', {}, 'ScapeMaker'),
-    );
+    const brand = h('div', { class: 'brand' }, svgIcon('c-wave', 16), h('span', {}, 'ScapeMaker'));
 
-    const name = h('button', {
-      class: 'proj-name',
-      onclick: () => this.rename(),
-    }, s.project.name);
+    const name = h('button', { class: 'proj-name', onclick: () => this.rename() }, s.project.name);
 
     const saved = h(
       'span',
@@ -47,32 +57,32 @@ export class TopBar {
       s.ui.dirty ? 'UNSAVED' : s.ui.savedAt ? `SAVED ${ago(s.ui.savedAt)}` : 'NOT SAVED',
     );
 
-    const tbtn = (icon: string, title: string, sub: string | undefined, on: boolean, cls: string, fn: () => void) =>
-      h(
-        'button',
-        { class: `tbtn ${cls}${on ? ' on' : ''}`, ...tt(title, sub ?? ''), onclick: fn },
-        svgIcon(icon, cls === 'play' ? 15 : 14),
-      );
+    this.playIcon = svgIcon('c-play', 15);
+    this.playBtn = h(
+      'button',
+      { class: 'tbtn play', ...tt('Play', 'Space'), onclick: () => (transport.playing ? transport.stop() : transport.play()) },
+      this.playIcon,
+    ) as HTMLButtonElement;
+
+    this.loopBtn = h(
+      'button',
+      { class: 'tbtn', ...tt('Loop playback', 'Repeats the marked region — L'), onclick: () => transport.toggleLoop() },
+      svgIcon('c-loop', 14),
+    ) as HTMLButtonElement;
 
     const transportEl = h(
       'div',
       { class: 'transport' },
-      tbtn('c-start', 'Go to start', 'Home', false, '', () => transport.goToStart()),
-      tbtn('c-play', t.playing ? 'Pause' : 'Play', 'Space', t.playing, 'play', () =>
-        t.playing ? transport.stop() : transport.play(),
-      ),
-      tbtn('c-stop', 'Stop', undefined, false, '', () => transport.stop()),
-      tbtn('c-loop', 'Loop playback', 'Repeats the marked region — L', t.looping, '', () => transport.toggleLoop()),
+      h('button', { class: 'tbtn', ...tt('Go to start', 'Home'), onclick: () => transport.goToStart() }, svgIcon('c-start', 14)),
+      this.playBtn,
+      h('button', { class: 'tbtn', ...tt('Stop'), onclick: () => transport.stop() }, svgIcon('c-stop', 14)),
+      this.loopBtn,
     );
 
-    const total = Math.max(s.project.duration, 0);
-    const tc = h(
-      'div',
-      { class: 'tc' },
-      timecode(t.playhead).split('.')[0],
-      h('span', { class: 'frac' }, `.${timecode(t.playhead).split('.')[1]}`),
-    );
-    const tcTotal = h('div', { class: 'tc-total' }, `/${timecode(total).replace(/^00:/, '')}`);
+    this.tcMain = h('span', {});
+    this.tcFrac = h('span', { class: 'frac' });
+    const tc = h('div', { class: 'tc' }, this.tcMain, this.tcFrac);
+    this.tcTotal = h('div', { class: 'tc-total' });
 
     const themeSwitch = h(
       'button',
@@ -88,16 +98,8 @@ export class TopBar {
     const modeSwitch = h(
       'div',
       { class: 'segmented' },
-      h(
-        'button',
-        { class: s.ui.mode === 'basic' ? 'active' : '', onclick: () => store.patchUi({ mode: 'basic' }) },
-        'Basic',
-      ),
-      h(
-        'button',
-        { class: s.ui.mode === 'advanced' ? 'active' : '', onclick: () => store.patchUi({ mode: 'advanced' }) },
-        'Advanced',
-      ),
+      h('button', { class: s.ui.mode === 'basic' ? 'active' : '', onclick: () => store.patchUi({ mode: 'basic' }) }, 'Basic'),
+      h('button', { class: s.ui.mode === 'advanced' ? 'active' : '', onclick: () => store.patchUi({ mode: 'advanced' }) }, 'Advanced'),
     );
 
     const rc = restrictedCount(s.project);
@@ -130,7 +132,7 @@ export class TopBar {
       h('div', { class: 'spacer' }),
       transportEl,
       tc,
-      tcTotal,
+      this.tcTotal,
       h('div', { class: 'spacer' }),
       this.undoRedo(),
       themeSwitch,
@@ -141,6 +143,28 @@ export class TopBar {
       save,
       exportBtn,
     );
+
+    this.updateTransport(s);
+  }
+
+  /** Lightweight — called on every transport tick. Never replaces DOM nodes. */
+  private updateTransport(s: AppState): void {
+    const t = s.transport;
+    const full = timecode(t.playhead);
+    const [main, frac] = full.split('.');
+    if (this.tcMain) this.tcMain.textContent = main;
+    if (this.tcFrac) this.tcFrac.textContent = `.${frac}`;
+    if (this.tcTotal) this.tcTotal.textContent = `/${timecode(Math.max(s.project.duration, 0)).replace(/^00:/, '')}`;
+
+    if (this.playBtn) {
+      this.playBtn.classList.toggle('on', t.playing);
+      this.playBtn.dataset.tt = t.playing ? 'Pause' : 'Play';
+    }
+    if (this.playIcon) {
+      const use = this.playIcon.querySelector('use');
+      use?.setAttribute('href', t.playing ? '#c-stop' : '#c-play');
+    }
+    if (this.loopBtn) this.loopBtn.classList.toggle('on', t.looping);
   }
 
   private undoRedo(): HTMLElement {

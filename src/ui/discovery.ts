@@ -5,6 +5,7 @@
  */
 
 import { store, type AppState, type DiscoveryTab } from '../state/store';
+import { transport } from '../audio/transport';
 import { clear, h, svgIcon, timecode } from './dom';
 import { tt } from './tooltip';
 import { licenceShort, licenceTone, makeLicence, ALL_LICENCE_IDS } from '../licence/model';
@@ -34,6 +35,9 @@ export class Discovery {
   private results: SoundResult[] = [];
   private busy = false;
   private lastError: string | null = null;
+  private currentTab!: DiscoveryTab;
+  private importingIds = new Set<string>();
+  private previewingId: string | null = null;
 
   constructor() {
     this.el = h('div', { class: 'panel-left' });
@@ -47,12 +51,27 @@ export class Discovery {
     );
     this.el.append(this.tabsEl, this.contentEl, drop);
     this.wireDrop();
+    const clearPreview = () => {
+      this.previewingId = null;
+      this.paintResults();
+    };
+    this.previewAudio.addEventListener('ended', clearPreview);
+    this.previewAudio.addEventListener('pause', clearPreview);
     this.renderTabs(store.get());
     this.renderContent(store.get());
+    this.currentTab = store.get().ui.discoveryTab;
     store.subscribe((s, changed) => {
       if (changed.has('ui')) {
         this.renderTabs(s);
-        this.renderContent(s);
+        // Only tear down and rebuild the content pane when the TAB itself
+        // changes. Rebuilding on every unrelated ui change (a toast timing
+        // out, a clip selection, a tool switch...) used to remount the map —
+        // resetting the pin to Manchester and re-running the search — and
+        // wiped in-progress search text on Archive/Freesound.
+        if (s.ui.discoveryTab !== this.currentTab) {
+          this.currentTab = s.ui.discoveryTab;
+          this.renderContent(s);
+        }
       }
       if (changed.has('project') && s.ui.discoveryTab === 'mine') this.renderContent(s);
     });
@@ -312,24 +331,13 @@ export class Discovery {
     if (!this.mapModule) this.mapModule = await import('./map');
     this.mapModule.mountMap(host, {
       radii: [...RADIUS_CHOICES_KM],
-      onSearch: async (centre, radiusKm) => {
-        this.setBusy(true);
-        try {
-          const page = await searchAporee(centre, radiusKm, { pageSize: 60 });
-          this.results = page.results;
-          this.lastError = page.results.length === 0 ? 'No field recordings within that radius. Try a wider radius or a different place.' : null;
-          return page.results;
-        } catch (err) {
-          this.lastError = err instanceof Error ? err.message : 'Map search failed.';
-          this.results = [];
-          return [];
-        } finally {
-          this.setBusy(false);
-          this.paintResults();
-        }
-      },
+      // The map owns its own results list entirely (see map.ts) — this just
+      // does the network call. Errors propagate so the map can show them
+      // inline without Discovery's tab-level state getting involved.
+      onSearch: (centre, radiusKm) => searchAporee(centre, radiusKm, { pageSize: 60 }).then((p) => p.results),
       onPreview: (r) => this.preview(r),
       onImport: (r) => this.doImport(r),
+      previewAudio: this.previewAudio,
     });
   }
 
@@ -342,8 +350,12 @@ export class Discovery {
   }
 
   private paintResults(): void {
-    const host = this.resultsHost ?? this.contentEl.querySelector<HTMLElement>('.scroll');
-    if (!host) return;
+    // Deliberately NOT falling back to a generic `.scroll` querySelector: the
+    // Map tab has its own `.scroll` results list (owned entirely by map.ts)
+    // and grabbing it here used to overwrite it with Discovery's stale
+    // `this.results` the moment a map preview/import ran.
+    const host = this.resultsHost;
+    if (!host || !host.isConnected) return;
     clear(host);
     if (this.busy) {
       host.append(h('div', { class: 'empty' }, 'Searching…'));
@@ -360,10 +372,12 @@ export class Discovery {
 
   private resultRow(r: SoundResult): HTMLElement {
     const tone = licenceTone(r.licence);
+    const importing = this.importingIds.has(r.id);
+    const previewing = this.previewingId === r.id;
     const meta =
       r.distanceKm != null && r.location
-        ? `${r.location.lat.toFixed(4)} ${r.location.lat >= 0 ? 'N' : 'S'} ${Math.abs(r.location.lon).toFixed(4)} ${r.location.lon >= 0 ? 'E' : 'W'} · ${r.distanceKm.toFixed(1)} KM${r.duration ? ` · ${timecode(r.duration, false)}` : ''}`
-        : `${r.author}${r.duration ? ` · ${timecode(r.duration, false)}` : ''}`;
+        ? `${r.location.lat.toFixed(4)} ${r.location.lat >= 0 ? 'N' : 'S'} ${Math.abs(r.location.lon).toFixed(4)} ${r.location.lon >= 0 ? 'E' : 'W'} · ${r.distanceKm.toFixed(1)} KM`
+        : r.author;
 
     const licChip = h(
       'span',
@@ -376,22 +390,36 @@ export class Discovery {
       licenceShort(r.licence),
     );
 
+    const durChip = r.duration
+      ? h('span', { class: 'dur-chip mono', ...tt('Duration') }, timecode(r.duration, false))
+      : null;
+
     return h(
       'div',
-      { class: 'result' },
+      { class: `result${importing ? ' importing' : ''}` },
       h(
         'button',
-        { class: 'play-sq', onclick: (e) => { e.stopPropagation(); this.preview(r); } },
-        svgIcon('c-play', 10),
+        {
+          class: `play-sq${previewing ? ' playing' : ''}`,
+          ...tt(previewing ? 'Stop preview' : 'Preview'),
+          onclick: (e) => { e.stopPropagation(); this.preview(r); },
+        },
+        svgIcon(previewing ? 'c-stop' : 'c-play', 10),
       ),
       h(
         'div',
         { class: 'r-main', onclick: () => this.doImport(r) },
         h('div', { class: 'r-title' }, r.title),
-        h('div', { class: 'r-meta' }, meta),
+        h('div', { class: 'r-meta' }, importing ? 'Importing…' : meta),
       ),
+      durChip ?? document.createComment('no-dur'),
       licChip,
     );
+  }
+
+  /** Public so the transport can silence any preview the moment the mix starts playing. */
+  stopPreview(): void {
+    if (!this.previewAudio.paused) this.previewAudio.pause();
   }
 
   private preview(r: SoundResult): void {
@@ -399,19 +427,34 @@ export class Discovery {
       store.toast('info', 'No preview for this item — import it to hear it on the timeline.');
       return;
     }
-    if (!this.previewAudio.paused && this.previewAudio.src === r.previewUrl) {
+    const alreadyPlaying = this.previewingId === r.id && !this.previewAudio.paused;
+    if (alreadyPlaying) {
       this.previewAudio.pause();
       return;
     }
+    if (store.get().transport.playing) transport.stop(); // never two things playing at once
     this.previewAudio.src = r.previewUrl;
-    void this.previewAudio.play().catch(() => store.toast('warn', 'Could not play preview.'));
+    this.previewingId = r.id;
+    this.paintResults();
+    void this.previewAudio.play().catch(() => {
+      store.toast('warn', 'Could not play preview.');
+      this.previewingId = null;
+      this.paintResults();
+    });
   }
 
   private async doImport(r: SoundResult): Promise<void> {
-    store.toast('info', `Importing “${r.title}”…`, 2000);
-    const res = await importResultToTimeline(r);
-    if (!res.ok && res.reason !== 'cancelled') store.toast('warn', res.reason ?? 'Import failed.');
-    else if (res.ok) store.toast('info', `Added “${r.title}”.`);
+    if (this.importingIds.has(r.id)) return; // already on its way — the timeline placeholder shows progress
+    this.importingIds.add(r.id);
+    this.paintResults();
+    try {
+      const res = await importResultToTimeline(r);
+      if (!res.ok && res.reason !== 'cancelled') store.toast('warn', res.reason ?? 'Import failed.');
+      else if (res.ok) store.toast('info', `Added “${r.title}”.`, 2500);
+    } finally {
+      this.importingIds.delete(r.id);
+      this.paintResults();
+    }
   }
 
   // ---- local file drop / pick ----

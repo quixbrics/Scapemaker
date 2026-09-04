@@ -23,6 +23,23 @@ export interface AutomationView {
   param: AutomationParam;
 }
 
+/**
+ * A source import in flight — a network fetch and/or decode that hasn't
+ * landed on the timeline yet. Its own AppState slice (not nested in `ui`) so
+ * per-progress-tick updates only wake the timeline, not every panel.
+ */
+export interface PendingImport {
+  id: string;
+  trackId: string;
+  start: number;
+  /** best current estimate in seconds — may be a fallback guess until decoded */
+  duration: number;
+  title: string;
+  phase: 'resolving' | 'fetching' | 'decoding';
+  /** 0..1, or -1 for indeterminate (unknown total size, or the decode phase) */
+  fraction: number;
+}
+
 export interface TransportState {
   playing: boolean;
   looping: boolean;
@@ -50,6 +67,7 @@ export interface AppState {
   project: Project;
   ui: UiState;
   transport: TransportState;
+  pendingImports: PendingImport[];
 }
 
 export type Listener = (state: AppState, changed: ReadonlySet<keyof AppState>) => void;
@@ -78,6 +96,7 @@ class Store {
     project: newProject(),
     ui: initialUi(),
     transport: initialTransport(),
+    pendingImports: [],
   };
 
   private listeners = new Set<Listener>();
@@ -131,7 +150,8 @@ class Store {
     this.state.project = project;
     this.state.ui = { ...this.state.ui, dirty: false, selection: { trackId: null, clipId: null }, automationView: null };
     this.state.transport = { ...initialTransport() };
-    this.emit(new Set(['project', 'ui', 'transport']));
+    this.state.pendingImports = [];
+    this.emit(new Set(['project', 'ui', 'transport', 'pendingImports']));
   }
 
   toast(kind: 'info' | 'warn' | 'error', text: string, ms = 4200): void {
@@ -145,6 +165,21 @@ class Store {
         this.emit(new Set(['ui']));
       }
     }, ms);
+  }
+
+  addPendingImport(p: PendingImport): void {
+    this.state.pendingImports = [...this.state.pendingImports, p];
+    this.emit(new Set(['pendingImports']));
+  }
+
+  updatePendingImport(id: string, patch: Partial<PendingImport>): void {
+    this.state.pendingImports = this.state.pendingImports.map((p) => (p.id === id ? { ...p, ...patch } : p));
+    this.emit(new Set(['pendingImports']));
+  }
+
+  removePendingImport(id: string): void {
+    this.state.pendingImports = this.state.pendingImports.filter((p) => p.id !== id);
+    this.emit(new Set(['pendingImports']));
   }
 
   markSaved(): void {

@@ -3,11 +3,16 @@
  * Nominatim geocoding, drop-a-pin, radius chips, clustered-ish result pins,
  * a mono coordinate readout. 78k items will not render individually, so we only
  * ever show the current radius search's results.
+ *
+ * mountMap() is called ONCE per visit to the Map tab (Discovery guards
+ * against remounting on unrelated state changes — see discovery.ts). All
+ * per-row state (which result is importing, which is previewing) therefore
+ * lives in this closure and repaints only the results list, never the map.
  */
 
 import L from 'leaflet';
 import 'leaflet/dist/leaflet.css';
-import { h, clear } from './dom';
+import { h, clear, svgIcon, timecode } from './dom';
 import { tt } from './tooltip';
 import type { SoundResult } from '../sources/types';
 import type { LatLon } from '../sources/geo';
@@ -16,13 +21,17 @@ export interface MapOptions {
   radii: number[];
   onSearch(centre: LatLon, radiusKm: number): Promise<SoundResult[]>;
   onPreview(r: SoundResult): void;
-  onImport(r: SoundResult): void;
+  onImport(r: SoundResult): Promise<void>;
+  /** shared with the rest of Discovery so only one thing ever plays at once */
+  previewAudio: HTMLAudioElement;
 }
 
 export function mountMap(host: HTMLElement, opts: MapOptions): void {
   clear(host);
   let radiusKm = opts.radii.includes(5) ? 5 : opts.radii[0];
   let centre: LatLon = { lat: 53.4808, lon: -2.2426 }; // Manchester
+  let currentResults: SoundResult[] = [];
+  const importingIds = new Set<string>();
 
   const searchInput = h('input', {
     type: 'text',
@@ -117,9 +126,93 @@ export function mountMap(host: HTMLElement, opts: MapOptions): void {
     }
   }
 
+  function isPreviewing(r: SoundResult): boolean {
+    return !opts.previewAudio.paused && !!r.previewUrl && opts.previewAudio.src === r.previewUrl;
+  }
+
+  function renderResultsList(): void {
+    clear(resultsEl);
+    if (currentResults.length === 0) {
+      resultsEl.append(
+        h('div', { class: 'empty' }, 'No field recordings within that radius. Try a wider radius or a different place.'),
+      );
+      return;
+    }
+    for (const r of currentResults.slice(0, 80)) {
+      const importing = importingIds.has(r.id);
+      const previewing = isPreviewing(r);
+      const durChip = r.duration
+        ? h('span', { class: 'dur-chip mono', ...tt('Duration') }, timecode(r.duration, false))
+        : null;
+
+      resultsEl.append(
+        h(
+          'div',
+          { class: `result${importing ? ' importing' : ''}` },
+          h(
+            'button',
+            {
+              class: `play-sq${previewing ? ' playing' : ''}`,
+              ...tt(previewing ? 'Stop preview' : 'Preview'),
+              onclick: (e) => { e.stopPropagation(); opts.onPreview(r); },
+            },
+            svgIcon(previewing ? 'c-stop' : 'c-play', 10),
+          ),
+          h(
+            'div',
+            {
+              class: 'r-main',
+              onclick: async () => {
+                if (importingIds.has(r.id)) return;
+                importingIds.add(r.id);
+                renderResultsList();
+                try {
+                  await opts.onImport(r);
+                } finally {
+                  importingIds.delete(r.id);
+                  renderResultsList();
+                }
+              },
+            },
+            h('div', { class: 'r-title' }, r.title),
+            h(
+              'div',
+              { class: 'r-meta' },
+              importing
+                ? 'Importing…'
+                : `${r.location ? `${Math.abs(r.location.lat).toFixed(4)} ${r.location.lat >= 0 ? 'N' : 'S'} ${Math.abs(r.location.lon).toFixed(4)} ${r.location.lon >= 0 ? 'E' : 'W'}` : ''} · ${(r.distanceKm ?? 0).toFixed(1)} KM`,
+            ),
+          ),
+          durChip ?? document.createComment('no-dur'),
+          h('span', { class: 'lic ' + (r.licence.id === 'unknown' ? 'unknown' : 'warn') }, r.licence.id === 'unknown' ? '?' : 'NC-ND'),
+        ),
+      );
+    }
+  }
+  // Repaint play/pause state when the shared preview element changes — no
+  // full remount, so this never touches the pin, radius or search results.
+  opts.previewAudio.addEventListener('play', renderResultsList);
+  opts.previewAudio.addEventListener('pause', renderResultsList);
+  opts.previewAudio.addEventListener('ended', renderResultsList);
+
   async function doSearch(): Promise<void> {
     countEl.textContent = '…';
-    const results = await opts.onSearch(centre, radiusKm);
+    clear(resultsEl);
+    resultsEl.append(h('div', { class: 'empty' }, 'Searching…'));
+    let results: SoundResult[];
+    try {
+      results = await opts.onSearch(centre, radiusKm);
+    } catch (err) {
+      countEl.textContent = '';
+      clear(resultsEl);
+      resultsEl.append(
+        h('div', { class: 'empty', style: 'color:var(--warn)' }, err instanceof Error ? err.message : 'Map search failed.'),
+      );
+      resultLayer.clearLayers();
+      currentResults = [];
+      return;
+    }
+    currentResults = results;
     countEl.textContent = `${results.length} FOUND`;
     resultLayer.clearLayers();
     for (const r of results) {
@@ -133,28 +226,7 @@ export function mountMap(host: HTMLElement, opts: MapOptions): void {
       m.on('click', () => opts.onPreview(r));
       resultLayer.addLayer(m);
     }
-    clear(resultsEl);
-    for (const r of results.slice(0, 80)) {
-      resultsEl.append(
-        h(
-          'div',
-          { class: 'result' },
-          h('button', { class: 'play-sq', onclick: () => opts.onPreview(r) }, '▶'),
-          h(
-            'div',
-            { class: 'r-main', onclick: () => opts.onImport(r) },
-            h('div', { class: 'r-title' }, r.title),
-            h(
-              'div',
-              { class: 'r-meta' },
-              `${r.location ? `${Math.abs(r.location.lat).toFixed(4)} ${r.location.lat >= 0 ? 'N' : 'S'} ${Math.abs(r.location.lon).toFixed(4)} ${r.location.lon >= 0 ? 'E' : 'W'}` : ''} · ${(r.distanceKm ?? 0).toFixed(1)} KM`,
-            ),
-          ),
-          h('span', { class: 'lic ' + (r.licence.id === 'unknown' ? 'unknown' : 'warn') }, r.licence.id === 'unknown' ? '?' : 'NC-ND'),
-        ),
-      );
-    }
-    void resultLayer;
+    renderResultsList();
   }
 
   setTimeout(() => map.invalidateSize(), 50);
