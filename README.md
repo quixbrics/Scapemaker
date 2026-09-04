@@ -52,11 +52,9 @@ No UI framework. A small number of long-lived panels driven by a central store.
 
 ## Known gaps
 
-- Automation lanes are modelled, scheduled and tested, but not yet drawn as an
-  editable curve on the timeline.
-- Crossfade wedges between overlapping clips are not rendered yet.
 - Integrated loudness is a best-effort ITU-R BS.1770 implementation.
-- `.scapemaker` project **save** is wired; **open** exists in code
-  (`loadProjectFromText`) but has no button yet.
+- The looped portion of a clip isn't re-tiled in the waveform canvas (it draws
+  one iteration stretched across the full repeated span); dashed tick marks at
+  each repeat boundary make the loop count legible in the meantime.
 - The Freesound preview CORS path and the in-browser memory ceiling still want a
   one-off manual check.

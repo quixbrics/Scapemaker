@@ -321,11 +321,25 @@ export function migrate(raw: unknown): MigrationResult {
 // ---------------------------------------------------------------------------
 
 /** Latest clip end across all tracks, in seconds. */
+/**
+ * A looping clip's `duration` is the length of ONE iteration (the segment
+ * taken from the asset) — this is the full on-timeline span, repeats and all,
+ * for anything that needs to know where the clip visually/temporally ends
+ * (the clip box width, `contentEnd`). Matches the repeat maths in
+ * `audio/graph.ts`'s `scheduleClip`.
+ */
+export function loopSpan(clip: Clip): number {
+  if (!clip.loop?.enabled || clip.loop.count <= 1) return clip.duration;
+  const xfade = Math.min(clip.loop.crossfade, clip.duration - 0.01);
+  const iter = Math.max(0.01, clip.duration - xfade);
+  return clip.duration + (clip.loop.count - 1) * iter;
+}
+
 export function contentEnd(project: Project): number {
   let end = 0;
   for (const track of project.tracks) {
     for (const clip of track.clips) {
-      end = Math.max(end, clip.start + clip.duration);
+      end = Math.max(end, clip.start + loopSpan(clip));
     }
   }
   return end;

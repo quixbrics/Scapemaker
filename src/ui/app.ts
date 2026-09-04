@@ -12,7 +12,7 @@ import { Discovery } from './discovery';
 import { Timeline } from './timeline';
 import { Inspector } from './inspector';
 import { MasterStrip } from './master';
-import { splitClipAtPlayhead, duplicateClip, deleteClip } from '../state/edits';
+import { splitClipAtPlayhead, duplicateClip, deleteClip, copySelectedClip, pasteClip } from '../state/edits';
 import { openExportDialog } from './dialogs/exportDialog';
 import { openProjectFile } from './dialogs/openProject';
 import { saveProjectToFile, scheduleAutosave } from '../state/persist';
@@ -79,7 +79,18 @@ function wireKeyboard(): void {
       splitClipAtPlayhead();
       return;
     }
-    if (typing) return;
+    if (typing) return; // never steal Cmd+C/V or anything else from a text field
+
+    if (mod && e.key.toLowerCase() === 'c') {
+      e.preventDefault();
+      copySelectedClip();
+      return;
+    }
+    if (mod && e.key.toLowerCase() === 'v') {
+      e.preventDefault();
+      pasteClip();
+      return;
+    }
 
     switch (e.key) {
       case ' ':
@@ -100,6 +111,10 @@ function wireKeyboard(): void {
       case 'f':
       case 'F':
         store.patchUi({ tool: 'crossfade' });
+        break;
+      case 'r':
+      case 'R':
+        store.patchUi({ tool: 'loop' });
         break;
       case 'l':
       case 'L':

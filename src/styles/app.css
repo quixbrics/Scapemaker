@@ -57,6 +57,12 @@
   background: var(--panel); display: flex; flex-direction: column; min-height: 0;
 }
 .centre { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+/* Dragging a clip (or scrubbing the ruler, or resizing a slider) used to
+   also start a native text-selection drag, which was distracting and made
+   the drag feedback hard to see. Inputs are exempt automatically — browsers
+   always allow selecting text inside a form field regardless of an
+   ancestor's user-select. */
+.centre, .master, .result { user-select: none; -webkit-user-select: none; }
 
 .tabs { display: flex; padding: 0 14px; border-bottom: 1px solid var(--line); }
 .tabs button {
@@ -81,6 +87,8 @@
   display: flex; gap: 10px; padding: 9px 8px; align-items: center; cursor: pointer;
   border-left: 2px solid transparent;
 }
+.result[draggable='true'] { cursor: grab; }
+.result[draggable='true']:active { cursor: grabbing; }
 .result:hover { background: var(--line-soft); }
 .result.sel { background: var(--row-sel); border-left-color: var(--accent); }
 .result .play-sq {
@@ -233,6 +241,8 @@
 }
 .fade-wedge.in { left: 0; }
 .fade-wedge.out { right: 0; }
+.clip.looping { background-image: repeating-linear-gradient(90deg, transparent, transparent 40px, color-mix(in srgb, var(--clip-border, var(--border)) 60%, transparent) 40px, transparent 41px); }
+.loop-tick { position: absolute; top: 15px; bottom: 0; width: 1px; background: var(--clip-border, var(--border)); opacity: .8; z-index: 1; }
 .clip .trim-handle {
   position: absolute; top: 0; bottom: 0; width: 6px; cursor: ew-resize; z-index: 2;
 }

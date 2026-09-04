@@ -34,7 +34,11 @@ import {
 } from '../state/effectEdits';
 import { evaluateAt } from '../audio/automation';
 import { AUTOMATION_PARAMS, AUTOMATION_PARAM_LIST, toUnit, fromUnit } from './automationParams';
-import type { AutomationParam, Clip, Track } from '../state/project';
+import { loopSpan, type AutomationParam, type Clip, type Track } from '../state/project';
+import { dragLoopClip, loopCountForSpan } from '../state/edits';
+import { importResultToTimeline } from '../sources/importResult';
+import { ASSET_DND_TYPE, SEARCH_RESULT_DND_TYPE } from './dnd';
+import type { SoundResult } from '../sources/types';
 
 const HEAD_W = 178;
 const CLIP_HEAD_H = 15;
@@ -104,6 +108,7 @@ export class Timeline {
       mk('trim', 'c-trim', 'Trim', 'Drag a clip edge — T'),
       mk('split', 'c-split', 'Split at playhead', 'Cmd/Ctrl + K'),
       mk('crossfade', 'c-fade', 'Crossfade', 'Overlap two clips to blend them — F'),
+      mk('loop', 'c-loop', 'Loop', 'Drag a clip’s edge to repeat it for as long as you drag — R'),
     );
 
     const snap = h(
@@ -457,7 +462,7 @@ export class Timeline {
   ): HTMLElement {
     const dur = s.project.duration;
     const leftPct = (clip.start / dur) * 100;
-    const widthPct = (clip.duration / dur) * 100;
+    const widthPct = (loopSpan(clip) / dur) * 100;
     const ref = s.project.assets[clip.assetId];
     const hue = track.index + 1;
     const tone = ref ? licenceTone(ref.licence) : 'unknown';
@@ -495,8 +500,9 @@ export class Timeline {
     }
 
     const fadeWedges: HTMLElement[] = [];
+    const span = loopSpan(clip);
     if (clip.fadeIn.duration > 0) {
-      const w = Math.min(100, (clip.fadeIn.duration / clip.duration) * 100);
+      const w = Math.min(100, (clip.fadeIn.duration / span) * 100);
       fadeWedges.push(
         h('div', {
           class: 'fade-wedge in',
@@ -506,7 +512,7 @@ export class Timeline {
       );
     }
     if (clip.fadeOut.duration > 0) {
-      const w = Math.min(100, (clip.fadeOut.duration / clip.duration) * 100);
+      const w = Math.min(100, (clip.fadeOut.duration / span) * 100);
       fadeWedges.push(
         h('div', {
           class: 'fade-wedge out',
@@ -516,12 +522,28 @@ export class Timeline {
       );
     }
 
+    const loopTicks: HTMLElement[] = [];
+    if (clip.loop?.enabled && clip.loop.count > 1) {
+      const iter = Math.max(0.01, clip.duration - clip.loop.crossfade);
+      for (let i = 1; i < clip.loop.count; i++) {
+        const at = clip.duration + (i - 1) * iter;
+        loopTicks.push(
+          h('div', {
+            class: 'loop-tick',
+            style: `left:${((at / span) * 100).toFixed(3)}%`,
+            ...tt(`Repeat ${i + 1}`, 'This clip loops its own content — drag the edge with the loop tool to change how many times.'),
+          }),
+        );
+      }
+    }
+
     const el = h(
       'div',
-      { class: `clip${selected ? ' sel' : ''}`, style, 'data-clip': clip.id },
+      { class: `clip${selected ? ' sel' : ''}${clip.loop?.enabled && clip.loop.count > 1 ? ' looping' : ''}`, style, 'data-clip': clip.id },
       h('div', { class: 'clip-head' }, ...headBits),
       canvas,
       ...fadeWedges,
+      ...loopTicks,
       h('div', { class: 'trim-handle l', 'data-edge': 'start' }),
       h('div', { class: 'trim-handle r', 'data-edge': 'end' }),
     );
@@ -556,13 +578,29 @@ export class Timeline {
 
   private onLaneDrop(e: DragEvent, track: Track): void {
     e.preventDefault();
-    const assetId = e.dataTransfer?.getData('application/x-scapemaker-asset');
-    if (!assetId) return;
-    const ref = store.get().project.assets[assetId] ?? assetStore.peek(assetId)?.ref;
-    if (!ref) return;
     const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
     const frac = (e.clientX - rect.left) / rect.width;
-    placeAsset(ref, track.id, this.snap(frac * store.get().project.duration));
+    const start = this.snap(frac * store.get().project.duration);
+
+    const assetId = e.dataTransfer?.getData(ASSET_DND_TYPE);
+    if (assetId) {
+      const ref = store.get().project.assets[assetId] ?? assetStore.peek(assetId)?.ref;
+      if (ref) placeAsset(ref, track.id, start);
+      return;
+    }
+
+    const searchResultJson = e.dataTransfer?.getData(SEARCH_RESULT_DND_TYPE);
+    if (searchResultJson) {
+      try {
+        const result = JSON.parse(searchResultJson) as SoundResult;
+        void importResultToTimeline(result, { trackId: track.id, start }).then((res) => {
+          if (!res.ok && res.reason !== 'cancelled') store.toast('warn', res.reason ?? 'Import failed.');
+          else if (res.ok) store.toast('info', `Added “${result.title}”.`, 2500);
+        });
+      } catch {
+        store.toast('error', 'Could not read that dropped item.');
+      }
+    }
   }
 
   private snap(seconds: number): number {
@@ -573,6 +611,7 @@ export class Timeline {
 
   private onClipDown(e: PointerEvent, track: Track, clip: Clip, bodyW: number): void {
     e.stopPropagation();
+    e.preventDefault(); // stop the browser starting a native text/image drag
     store.patchUi({ selection: { trackId: track.id, clipId: clip.id } });
 
     const tool = store.get().ui.tool;
@@ -588,21 +627,30 @@ export class Timeline {
       return;
     }
 
-    const mode: 'move' | 'trim-start' | 'trim-end' =
-      tool === 'crossfade'
-        ? 'move'
-        : edge === 'start' || (tool === 'trim' && this.nearLeft(e))
-          ? 'trim-start'
-          : edge === 'end' || tool === 'trim'
-            ? 'trim-end'
-            : 'move';
+    const mode: 'move' | 'trim-start' | 'trim-end' | 'loop' =
+      tool === 'loop'
+        ? 'loop'
+        : tool === 'crossfade'
+          ? 'move'
+          : edge === 'start' || (tool === 'trim' && this.nearLeft(e))
+            ? 'trim-start'
+            : edge === 'end' || tool === 'trim'
+              ? 'trim-end'
+              : 'move';
 
+    const originSpan = loopSpan(clip);
     const clipEl = e.currentTarget as HTMLElement;
     const move = (ev: PointerEvent) => {
       const dxSec = (ev.clientX - startX) / pxPerSec;
       if (mode === 'move') {
         if (Math.abs(ev.clientX - startX) >= 3) clipEl.classList.add('dragging');
         clipEl.style.left = `${((this.snap(originStart + dxSec) / dur) * 100).toFixed(3)}%`;
+      } else if (mode === 'loop') {
+        if (Math.abs(ev.clientX - startX) >= 3) clipEl.classList.add('dragging');
+        const targetSpan = Math.max(clip.duration, originSpan + dxSec);
+        const count = loopCountForSpan(clip.duration, clip.loop?.crossfade ?? 0.05, targetSpan);
+        const snappedSpan = count === 1 ? clip.duration : clip.duration + (count - 1) * (clip.duration - (clip.loop?.crossfade ?? 0.05));
+        clipEl.style.width = `${((snappedSpan / dur) * 100).toFixed(3)}%`;
       }
     };
     const up = (ev: PointerEvent) => {
@@ -610,7 +658,10 @@ export class Timeline {
       window.removeEventListener('pointerup', up);
       clipEl.classList.remove('dragging');
       const dxSec = (ev.clientX - startX) / pxPerSec;
-      if (Math.abs(ev.clientX - startX) < 3 && mode === 'move') return; // pure click
+      if (Math.abs(ev.clientX - startX) < 3) {
+        if (mode === 'move') return; // pure click, nothing to do
+        if (mode === 'loop') return; // too small a drag to count as looping
+      }
       if (mode === 'move' && tool === 'crossfade') {
         moveClipWithCrossfade(track.id, clip.id, this.snap(originStart + dxSec));
       } else if (mode === 'move') {
@@ -618,6 +669,8 @@ export class Timeline {
         const overLane = document.elementFromPoint(ev.clientX, ev.clientY)?.closest('.lane') as HTMLElement | null;
         const targetTrackId = overLane?.dataset.track ?? track.id;
         moveClip(track.id, clip.id, this.snap(originStart + dxSec), targetTrackId);
+      } else if (mode === 'loop') {
+        dragLoopClip(track.id, clip.id, originSpan + dxSec);
       } else {
         trimClip(track.id, clip.id, mode === 'trim-start' ? 'start' : 'end', dxSec);
       }

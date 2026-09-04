@@ -9,7 +9,7 @@ import { newProject } from './project';
 
 export type Workspace = 'discovery' | 'production';
 export type Mode = 'basic' | 'advanced';
-export type Tool = 'select' | 'trim' | 'split' | 'crossfade';
+export type Tool = 'select' | 'trim' | 'split' | 'crossfade' | 'loop';
 export type DiscoveryTab = 'freesound' | 'archive' | 'map' | 'mine';
 
 export interface Selection {

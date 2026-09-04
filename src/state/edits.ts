@@ -244,6 +244,49 @@ export function splitClipAtPlayhead(): void {
   );
 }
 
+// --- copy / paste --------------------------------------------------------
+
+let clipboard: { clip: Clip; trackId: string } | null = null;
+
+/** Cmd/Ctrl+C — copies the selected clip's parameters (not audio) to an in-memory clipboard. */
+export function copySelectedClip(): void {
+  const { trackId, clipId } = store.get().ui.selection;
+  if (!trackId || !clipId) return;
+  const clip = findClip(store.get().project, trackId, clipId);
+  if (!clip) return;
+  clipboard = { clip: structuredClone(clip), trackId };
+  store.toast('info', 'Clip copied — Cmd/Ctrl + V to paste at the playhead.', 2200);
+}
+
+/**
+ * Cmd/Ctrl+V — pastes onto the selected track (falling back to the track it
+ * was copied from) at the current playhead position. Same asset, new clip —
+ * allocates no audio, exactly like duplicate.
+ */
+export function pasteClip(): void {
+  if (!clipboard) return;
+  const { trackId: selectedTrack } = store.get().ui.selection;
+  const targetTrackId = selectedTrack ?? clipboard.trackId;
+  if (!findTrack(store.get().project, targetTrackId)) return;
+  const at = Math.max(0, store.get().transport.playhead);
+  const newId = uid('clp');
+  const source = clipboard.clip;
+
+  history.push({
+    label: 'Paste clip',
+    do(pr) {
+      const t = findTrack(pr, targetTrackId)!;
+      t.clips.push({ ...structuredClone(source), id: newId, start: at });
+      pr.duration = fitDuration(pr);
+    },
+    undo(pr) {
+      const t = findTrack(pr, targetTrackId);
+      if (t) t.clips = t.clips.filter((c) => c.id !== newId);
+    },
+  });
+  store.patchUi({ selection: { trackId: targetTrackId, clipId: newId } });
+}
+
 export function duplicateClip(trackId: string, clipId: string): void {
   const p = store.get().project;
   const clip = findClip(p, trackId, clipId);
@@ -283,6 +326,32 @@ export function setClipLoop(trackId: string, clipId: string, count: number, cros
       pr.duration = fitDuration(pr);
     }),
   );
+}
+
+const DEFAULT_LOOP_CROSSFADE = 0.05;
+
+/** How many whole+partial iterations of `iterDuration` (minus the crossfade overlap) fit a target span. */
+export function loopCountForSpan(iterDuration: number, crossfade: number, targetSpan: number): number {
+  const xfade = Math.min(crossfade, Math.max(0, iterDuration - 0.01));
+  const step = Math.max(0.01, iterDuration - xfade);
+  const count = 1 + Math.round((targetSpan - iterDuration) / step);
+  return Math.max(1, Math.min(200, count));
+}
+
+/**
+ * Loop tool (UI spec §7.4 / Build Plan §7.4): drag a clip's edge with the loop
+ * tool active and it repeats its own content for as long as you drag, instead
+ * of trimming into silence. `targetSpanSeconds` is the full on-timeline length
+ * the student dragged out to; the iteration length (`clip.duration`) never
+ * changes — only how many times it repeats.
+ */
+export function dragLoopClip(trackId: string, clipId: string, targetSpanSeconds: number): void {
+  const p = store.get().project;
+  const clip = findClip(p, trackId, clipId);
+  if (!clip) return;
+  const crossfade = clip.loop?.crossfade ?? DEFAULT_LOOP_CROSSFADE;
+  const count = loopCountForSpan(clip.duration, crossfade, Math.max(clip.duration, targetSpanSeconds));
+  setClipLoop(trackId, clipId, count, crossfade);
 }
 
 export function setClipFade(

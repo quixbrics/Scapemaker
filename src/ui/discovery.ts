@@ -2,6 +2,12 @@
  * Left panel — Discovery (UI spec §4.2). Tabs: Freesound · Archive · Map · Mine.
  * The whole panel is a drop target for local files (the primary import path).
  * A paste-a-URL field sits under Freesound.
+ *
+ * Every tab's pane is built ONCE and kept mounted forever, just shown/hidden
+ * with `hidden` — switching tabs used to clear()+rebuild the content area,
+ * which discarded whatever you'd typed or found (and, for the map, reset the
+ * pin to Manchester and re-ran the search). Search results now persist per
+ * source until that source is searched again.
  */
 
 import { store, type AppState, type DiscoveryTab } from '../state/store';
@@ -25,78 +31,90 @@ import { importResultToTimeline, placeLocalAsset } from '../sources/importResult
 import { importFiles, filesFromDataTransfer, FILE_PICKER_ACCEPT } from '../sources/local';
 import { assetStore } from '../audio/assetStore';
 import type { AssetRef } from '../state/project';
+import { ASSET_DND_TYPE, SEARCH_RESULT_DND_TYPE } from './dnd';
+
+const TABS: [DiscoveryTab, string][] = [
+  ['freesound', 'Freesound'],
+  ['archive', 'Archive'],
+  ['map', 'Map'],
+  ['mine', 'Mine'],
+];
+
+interface SearchState {
+  resultsHost: HTMLElement;
+  results: SoundResult[];
+  busy: boolean;
+  error: string | null;
+}
 
 export class Discovery {
   readonly el: HTMLElement;
   private tabsEl!: HTMLElement;
-  private contentEl!: HTMLElement;
+  private panesEl!: HTMLElement;
+  private panes: Partial<Record<DiscoveryTab, HTMLElement>> = {};
   private previewAudio = new Audio();
   private mapModule: typeof import('./map') | null = null;
-  private results: SoundResult[] = [];
-  private busy = false;
-  private lastError: string | null = null;
-  private currentTab!: DiscoveryTab;
+  private mapMounted = false;
   private importingIds = new Set<string>();
   private previewingId: string | null = null;
+
+  private freesound: SearchState = { resultsHost: h('div'), results: [], busy: false, error: null };
+  private archive: SearchState = { resultsHost: h('div'), results: [], busy: false, error: null };
 
   constructor() {
     this.el = h('div', { class: 'panel-left' });
     this.tabsEl = h('div', { class: 'tabs' });
-    this.contentEl = h('div', { class: 'scroll', style: 'display:flex;flex-direction:column;min-height:0;flex:1' });
+    this.panesEl = h('div', { class: 'scroll', style: 'display:flex;flex-direction:column;min-height:0;flex:1' });
     const drop = h(
       'div',
       { class: 'dropzone', onclick: () => this.pickFiles() },
       svgIcon('c-file', 14),
       h('span', {}, 'Drop your own recordings here'),
     );
-    this.el.append(this.tabsEl, this.contentEl, drop);
+    this.el.append(this.tabsEl, this.panesEl, drop);
     this.wireDrop();
+
     const clearPreview = () => {
       this.previewingId = null;
-      this.paintResults();
+      this.paintFreesound();
+      this.paintArchive();
     };
     this.previewAudio.addEventListener('ended', clearPreview);
     this.previewAudio.addEventListener('pause', clearPreview);
+
+    this.panes.freesound = this.buildFreesoundPane();
+    this.panes.archive = this.buildArchivePane();
+    this.panes.mine = h('div', { style: 'display:flex;flex-direction:column;min-height:0;flex:1' });
+    this.panes.map = h('div', { style: 'display:flex;flex-direction:column;min-height:0;flex:1' });
+    for (const [id] of TABS) {
+      const pane = this.panes[id]!;
+      pane.hidden = true;
+      this.panesEl.append(pane);
+    }
+    this.renderMine();
+
     this.renderTabs(store.get());
-    this.renderContent(store.get());
-    this.currentTab = store.get().ui.discoveryTab;
+    this.showTab(store.get().ui.discoveryTab);
+
     store.subscribe((s, changed) => {
       if (changed.has('ui')) {
         this.renderTabs(s);
-        // Only tear down and rebuild the content pane when the TAB itself
-        // changes. Rebuilding on every unrelated ui change (a toast timing
-        // out, a clip selection, a tool switch...) used to remount the map —
-        // resetting the pin to Manchester and re-running the search — and
-        // wiped in-progress search text on Archive/Freesound.
-        if (s.ui.discoveryTab !== this.currentTab) {
-          this.currentTab = s.ui.discoveryTab;
-          this.renderContent(s);
-        }
+        this.showTab(s.ui.discoveryTab);
       }
-      if (changed.has('project') && s.ui.discoveryTab === 'mine') this.renderContent(s);
+      if (changed.has('project')) this.renderMine();
     });
   }
 
   // ---- tabs ----
   private renderTabs(s: AppState): void {
     clear(this.tabsEl);
-    const tabs: [DiscoveryTab, string][] = [
-      ['freesound', 'Freesound'],
-      ['archive', 'Archive'],
-      ['map', 'Map'],
-      ['mine', 'Mine'],
-    ];
-    for (const [id, label] of tabs) {
+    for (const [id, label] of TABS) {
       this.tabsEl.append(
         h(
           'button',
           {
             class: s.ui.discoveryTab === id ? 'active' : '',
-            onclick: () => {
-              this.results = [];
-              this.lastError = null;
-              store.patchUi({ discoveryTab: id });
-            },
+            onclick: () => store.patchUi({ discoveryTab: id }),
           },
           label,
         ),
@@ -104,26 +122,22 @@ export class Discovery {
     }
   }
 
-  // ---- content dispatch ----
-  private renderContent(s: AppState): void {
-    clear(this.contentEl);
-    switch (s.ui.discoveryTab) {
-      case 'freesound':
-        return this.renderFreesound();
-      case 'archive':
-        return this.renderTextSearch('archive');
-      case 'map':
-        return void this.renderMap();
-      case 'mine':
-        return this.renderMine(s);
+  private showTab(tab: DiscoveryTab): void {
+    for (const [id] of TABS) {
+      const pane = this.panes[id];
+      if (pane) pane.hidden = id !== tab;
     }
+    if (tab === 'map' && !this.mapMounted) void this.mountMapPane();
   }
 
   // ---- Mine (imported bin) ----
-  private renderMine(s: AppState): void {
-    const refs = Object.values(s.project.assets);
+  private renderMine(): void {
+    const pane = this.panes.mine;
+    if (!pane) return;
+    clear(pane);
+    const refs = Object.values(store.get().project.assets);
     if (refs.length === 0) {
-      this.contentEl.append(
+      pane.append(
         h(
           'div',
           { class: 'empty' },
@@ -135,24 +149,22 @@ export class Discovery {
       );
       return;
     }
-    const list = h('div', { style: 'padding:4px 6px' });
-    for (const ref of refs) {
-      list.append(this.assetRow(ref));
-    }
-    this.contentEl.append(list);
+    const list = h('div', { class: 'scroll', style: 'padding:4px 6px' });
+    for (const ref of refs) list.append(this.assetRow(ref));
+    pane.append(list);
   }
 
   private assetRow(ref: AssetRef): HTMLElement {
     const tone = licenceTone(ref.licence);
     const entry = assetStore.peek(ref.id);
     const dur = entry?.buffer.duration ?? ref.duration;
-    const row = h(
+    return h(
       'div',
       {
         class: 'result',
         draggable: 'true',
         ondragstart: (e) => {
-          (e as DragEvent).dataTransfer?.setData('application/x-scapemaker-asset', ref.id);
+          (e as DragEvent).dataTransfer?.setData(ASSET_DND_TYPE, ref.id);
         },
         onclick: () => placeLocalAsset(ref),
         ...tt('Add to timeline', 'Click to drop on the first empty track, or drag onto a lane.'),
@@ -162,48 +174,64 @@ export class Discovery {
         'div',
         { class: 'r-main' },
         h('div', { class: 'r-title' }, ref.title),
-        h('div', { class: 'r-meta' }, `${ref.author} · ${timecode(dur, false)}`),
+        h('div', { class: 'r-meta' }, ref.author),
       ),
+      dur ? h('span', { class: 'dur-chip mono' }, timecode(dur, false)) : document.createComment('no-dur'),
       h('span', { class: `lic ${tone}` }, licenceShort(ref.licence)),
     );
-    return row;
   }
 
-  // ---- text search (Archive) ----
-  private renderTextSearch(_source: 'archive'): void {
+  // ---- Archive ----
+  private buildArchivePane(): HTMLElement {
     const input = h('input', {
       type: 'text',
       placeholder: 'Search the Internet Archive…',
       onkeydown: (e) => {
-        if ((e as KeyboardEvent).key === 'Enter') this.runTextSearch('archive', (e.target as HTMLInputElement).value);
+        if ((e as KeyboardEvent).key === 'Enter') this.runArchiveSearch((e.target as HTMLInputElement).value);
       },
     }) as HTMLInputElement;
-    this.contentEl.append(
+    this.archive.resultsHost = h('div', { class: 'scroll', style: 'flex:1' });
+    this.paintArchive();
+    return h(
+      'div',
+      { style: 'display:flex;flex-direction:column;min-height:0;flex:1' },
       h('div', { class: 'pad' }, h('div', { class: 'field' }, svgIcon('c-search', 14), input)),
-      this.resultsContainer(),
+      this.archive.resultsHost,
     );
   }
 
-  private async runTextSearch(_source: 'archive', query: string): Promise<void> {
+  private async runArchiveSearch(query: string): Promise<void> {
     if (!query.trim()) return;
-    this.setBusy(true);
+    this.archive.busy = true;
+    this.paintArchive();
     try {
       const page = await searchArchive(query, { pageSize: 40 });
-      this.results = page.results;
-      this.lastError = null;
+      this.archive.results = page.results;
+      this.archive.error = null;
     } catch (err) {
-      this.lastError = err instanceof Error ? err.message : 'Search failed.';
-      this.results = [];
+      this.archive.error = err instanceof Error ? err.message : 'Search failed.';
+      this.archive.results = [];
     } finally {
-      this.setBusy(false);
-      this.paintResults();
+      this.archive.busy = false;
+      this.paintArchive();
     }
   }
 
+  private paintArchive(): void {
+    this.paintSearchPane(this.archive);
+  }
+
   // ---- Freesound ----
-  private renderFreesound(): void {
+  private buildFreesoundPane(): HTMLElement {
+    const pane = h('div', { style: 'display:flex;flex-direction:column;min-height:0;flex:1' });
+    this.renderFreesoundInner(pane);
+    return pane;
+  }
+
+  private renderFreesoundInner(pane: HTMLElement): void {
+    clear(pane);
     if (!hasKey()) {
-      this.contentEl.append(this.freesoundKeyPanel());
+      pane.append(this.freesoundKeyPanel(pane));
       return;
     }
     const input = h('input', {
@@ -222,7 +250,10 @@ export class Discovery {
       },
     }) as HTMLInputElement;
 
-    this.contentEl.append(
+    this.freesound.resultsHost = h('div', { class: 'scroll', style: 'flex:1' });
+    this.paintFreesound();
+
+    pane.append(
       h(
         'div',
         { class: 'pad' },
@@ -230,15 +261,15 @@ export class Discovery {
         h('div', { class: 'field', style: 'margin-top:8px' }, svgIcon('c-file', 14), pasteInput),
         h(
           'button',
-          { class: 'linkish', style: 'margin-top:8px;font-size:11px', onclick: () => { forgetKey(); this.renderContent(store.get()); } },
+          { class: 'linkish', style: 'margin-top:8px;font-size:11px', onclick: () => { forgetKey(); this.renderFreesoundInner(pane); } },
           'Forget key on this machine',
         ),
       ),
-      this.resultsContainer(),
+      this.freesound.resultsHost,
     );
   }
 
-  private freesoundKeyPanel(): HTMLElement {
+  private freesoundKeyPanel(pane: HTMLElement): HTMLElement {
     const key = h('input', { type: 'text', placeholder: 'paste your API key here' }) as HTMLInputElement;
     const status = h('div', { class: 'muted', style: 'margin-top:6px' }, '');
     const connect = async () => {
@@ -250,7 +281,7 @@ export class Discovery {
         if (ok) {
           setKey(v);
           store.toast('info', 'Freesound connected.');
-          this.renderContent(store.get());
+          this.renderFreesoundInner(pane);
         } else {
           status.textContent = 'That key was rejected. Check you copied the “Client secret/Api key” value.';
         }
@@ -283,27 +314,28 @@ export class Discovery {
 
   private async runFreesoundSearch(query: string): Promise<void> {
     if (!query.trim()) return;
-    this.setBusy(true);
+    this.freesound.busy = true;
+    this.paintFreesound();
     try {
       const page = await searchFreesound(query, { pageSize: 40 });
-      this.results = page.results;
-      this.lastError = null;
+      this.freesound.results = page.results;
+      this.freesound.error = null;
     } catch (err) {
-      this.lastError = err instanceof Error ? err.message : 'Search failed.';
-      this.results = [];
+      this.freesound.error = err instanceof Error ? err.message : 'Search failed.';
+      this.freesound.results = [];
     } finally {
-      this.setBusy(false);
-      this.paintResults();
+      this.freesound.busy = false;
+      this.paintFreesound();
     }
   }
 
   private async runPaste(url: string): Promise<void> {
     if (!url.trim()) return;
-    this.setBusy(true);
+    this.freesound.busy = true;
+    this.paintFreesound();
     try {
       const resolved = await resolveFreesoundUrl(url);
       if (resolved.needsLicenceChoice) {
-        // ask for licence via a small inline prompt
         const id = window.prompt(
           `No key set, so the licence can't be read automatically.\nType the licence id for "${resolved.result.title}":\n${ALL_LICENCE_IDS.join(', ')}`,
           'by',
@@ -312,22 +344,26 @@ export class Discovery {
           resolved.result.licence = makeLicence(id as never);
         }
       }
-      this.results = [resolved.result, ...this.results];
-      this.lastError = resolved.needsLicenceChoice
+      this.freesound.results = [resolved.result, ...this.freesound.results];
+      this.freesound.error = resolved.needsLicenceChoice
         ? 'Imported from URL with no API call. Download the file from Freesound and drag it in to add the audio.'
         : null;
     } catch (err) {
-      this.lastError = err instanceof Error ? err.message : 'Could not resolve that URL.';
+      this.freesound.error = err instanceof Error ? err.message : 'Could not resolve that URL.';
     } finally {
-      this.setBusy(false);
-      this.paintResults();
+      this.freesound.busy = false;
+      this.paintFreesound();
     }
   }
 
+  private paintFreesound(): void {
+    this.paintSearchPane(this.freesound);
+  }
+
   // ---- Map ----
-  private async renderMap(): Promise<void> {
-    const host = h('div', { style: 'display:flex;flex-direction:column;flex:1;min-height:0' });
-    this.contentEl.append(host);
+  private async mountMapPane(): Promise<void> {
+    this.mapMounted = true;
+    const host = this.panes.map!;
     if (!this.mapModule) this.mapModule = await import('./map');
     this.mapModule.mountMap(host, {
       radii: [...RADIUS_CHOICES_KM],
@@ -341,33 +377,22 @@ export class Discovery {
     });
   }
 
-  // ---- results list ----
-  private resultsHost: HTMLElement | null = null;
-  private resultsContainer(): HTMLElement {
-    this.resultsHost = h('div', { class: 'scroll', style: 'flex:1' });
-    this.paintResults();
-    return this.resultsHost;
-  }
-
-  private paintResults(): void {
-    // Deliberately NOT falling back to a generic `.scroll` querySelector: the
-    // Map tab has its own `.scroll` results list (owned entirely by map.ts)
-    // and grabbing it here used to overwrite it with Discovery's stale
-    // `this.results` the moment a map preview/import ran.
-    const host = this.resultsHost;
-    if (!host || !host.isConnected) return;
+  // ---- shared search-results rendering (Freesound + Archive) ----
+  private paintSearchPane(state: SearchState): void {
+    const host = state.resultsHost;
+    if (!host.isConnected) return;
     clear(host);
-    if (this.busy) {
+    if (state.busy) {
       host.append(h('div', { class: 'empty' }, 'Searching…'));
       return;
     }
-    if (this.lastError) host.append(h('div', { class: 'empty', style: 'color:var(--warn)' }, this.lastError));
-    if (this.results.length === 0 && !this.lastError) {
+    if (state.error) host.append(h('div', { class: 'empty', style: 'color:var(--warn)' }, state.error));
+    if (state.results.length === 0 && !state.error) {
       host.append(h('div', { class: 'empty' }, 'No results yet.'));
       return;
     }
-    host.append(h('div', { class: 'radius-row' }, h('span', { class: 'count' }, `${this.results.length} FOUND`)));
-    for (const r of this.results) host.append(this.resultRow(r));
+    host.append(h('div', { class: 'radius-row' }, h('span', { class: 'count' }, `${state.results.length} FOUND`)));
+    for (const r of state.results) host.append(this.resultRow(r));
   }
 
   private resultRow(r: SoundResult): HTMLElement {
@@ -396,7 +421,17 @@ export class Discovery {
 
     return h(
       'div',
-      { class: `result${importing ? ' importing' : ''}` },
+      {
+        class: `result${importing ? ' importing' : ''}`,
+        draggable: importing ? 'false' : 'true',
+        ...tt('Drag onto a track', 'Drop it where you want the clip to start.'),
+        ondragstart: (e) => {
+          const dt = (e as DragEvent).dataTransfer;
+          if (!dt || importing) return;
+          dt.effectAllowed = 'copy';
+          dt.setData(SEARCH_RESULT_DND_TYPE, JSON.stringify(r));
+        },
+      },
       h(
         'button',
         {
@@ -408,7 +443,7 @@ export class Discovery {
       ),
       h(
         'div',
-        { class: 'r-main', onclick: () => this.doImport(r) },
+        { class: 'r-main' },
         h('div', { class: 'r-title' }, r.title),
         h('div', { class: 'r-meta' }, importing ? 'Importing…' : meta),
       ),
@@ -424,7 +459,7 @@ export class Discovery {
 
   private preview(r: SoundResult): void {
     if (!r.previewUrl) {
-      store.toast('info', 'No preview for this item — import it to hear it on the timeline.');
+      store.toast('info', 'No preview for this item — drag it onto a track to hear it.');
       return;
     }
     const alreadyPlaying = this.previewingId === r.id && !this.previewAudio.paused;
@@ -435,25 +470,30 @@ export class Discovery {
     if (store.get().transport.playing) transport.stop(); // never two things playing at once
     this.previewAudio.src = r.previewUrl;
     this.previewingId = r.id;
-    this.paintResults();
+    this.paintFreesound();
+    this.paintArchive();
     void this.previewAudio.play().catch(() => {
       store.toast('warn', 'Could not play preview.');
       this.previewingId = null;
-      this.paintResults();
+      this.paintFreesound();
+      this.paintArchive();
     });
   }
 
+  /** Import at an unspecified track/position (used by the Map tab's row click, and available for programmatic use). */
   private async doImport(r: SoundResult): Promise<void> {
     if (this.importingIds.has(r.id)) return; // already on its way — the timeline placeholder shows progress
     this.importingIds.add(r.id);
-    this.paintResults();
+    this.paintFreesound();
+    this.paintArchive();
     try {
       const res = await importResultToTimeline(r);
       if (!res.ok && res.reason !== 'cancelled') store.toast('warn', res.reason ?? 'Import failed.');
       else if (res.ok) store.toast('info', `Added “${r.title}”.`, 2500);
     } finally {
       this.importingIds.delete(r.id);
-      this.paintResults();
+      this.paintFreesound();
+      this.paintArchive();
     }
   }
 
@@ -472,7 +512,7 @@ export class Discovery {
       off();
       const dt = (e as DragEvent).dataTransfer;
       if (!dt) return;
-      if (dt.getData('application/x-scapemaker-asset')) return; // internal drag
+      if (dt.getData(ASSET_DND_TYPE) || dt.getData(SEARCH_RESULT_DND_TYPE)) return; // internal drag
       const files = await filesFromDataTransfer(dt);
       if (files.length) await this.ingest(files);
     });
@@ -504,10 +544,5 @@ export class Discovery {
     } else {
       store.toast('info', `Imported ${imported.length} file${imported.length > 1 ? 's' : ''}. They’re in “Mine” — drag onto a track.`);
     }
-  }
-
-  private setBusy(v: boolean): void {
-    this.busy = v;
-    if (v) this.paintResults();
   }
 }
