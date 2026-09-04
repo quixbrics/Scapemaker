@@ -7,7 +7,7 @@
 
 import { openDB } from 'idb';
 import type { AssetRef, Project } from './project';
-import { migrate } from './project';
+import { migrate, newProject } from './project';
 import { assetStore } from '../audio/assetStore';
 import { store } from './store';
 import { history } from './history';
@@ -71,6 +71,23 @@ export async function loadProjectFromText(text: string): Promise<LoadResult> {
 export function applyLoadedProject(project: Project): void {
   store.setProject(project);
   history.clear();
+}
+
+/**
+ * Guard for any action that discards the current project (New, Open, or
+ * navigating away with unsaved work) — asks first when there is something to
+ * lose, exactly once, using the browser's own confirm.
+ */
+export function confirmDiscardIfDirty(verb: string): boolean {
+  if (!store.get().ui.dirty) return true;
+  return window.confirm(`You have unsaved changes. ${verb} anyway?`);
+}
+
+export function startNewProject(): void {
+  if (!confirmDiscardIfDirty('Start a new project')) return;
+  store.setProject(newProject());
+  history.clear();
+  void clearAutosave();
 }
 
 // --- autosave (IndexedDB) --------------------------------------------------

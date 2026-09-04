@@ -102,6 +102,82 @@ export function moveClip(trackId: string, clipId: string, newStart: number, newT
   });
 }
 
+/**
+ * Crossfade tool (UI spec §4.5 / Build Plan §7.5): drag a clip to overlap its
+ * same-track neighbour, and the overlap becomes a crossfade — the earlier
+ * clip's fade-out and the later clip's fade-in both set to the overlap length.
+ * Equal-power is the default, matching the concept's ambience-first framing.
+ * Same-track only; a cross-track drop just moves the clip with no crossfade.
+ */
+export function moveClipWithCrossfade(trackId: string, clipId: string, newStart: number): void {
+  const p = store.get().project;
+  const track = findTrack(p, trackId);
+  const clip = findClip(p, trackId, clipId);
+  if (!track || !clip) return;
+  const from = clip.start;
+  const fromFadeIn = { ...clip.fadeIn };
+  const fromFadeOut = { ...clip.fadeOut };
+
+  const clampedStart = Math.max(0, newStart);
+  const neighbours = track.clips.filter((c) => c.id !== clipId);
+  const clipEnd = clampedStart + clip.duration;
+
+  let leftNeighbour: Clip | undefined; // ends inside/after our start — we overlap its tail
+  let rightNeighbour: Clip | undefined; // starts inside our span — we overlap its head
+  for (const n of neighbours) {
+    const nEnd = n.start + n.duration;
+    if (n.start < clampedStart && nEnd > clampedStart) leftNeighbour = n;
+    if (n.start < clipEnd && n.start >= clampedStart) rightNeighbour = n;
+  }
+
+  const leftBefore = leftNeighbour ? { ...leftNeighbour.fadeOut } : null;
+  const rightBefore = rightNeighbour ? { ...rightNeighbour.fadeIn } : null;
+  const leftId = leftNeighbour?.id;
+  const rightId = rightNeighbour?.id;
+
+  history.push({
+    label: 'Crossfade',
+    do(pr) {
+      const t = findTrack(pr, trackId)!;
+      const c = t.clips.find((x) => x.id === clipId)!;
+      c.start = clampedStart;
+
+      if (leftId) {
+        const left = t.clips.find((x) => x.id === leftId)!;
+        const overlap = Math.min(left.start + left.duration - clampedStart, left.duration, c.duration);
+        if (overlap > 0.02) {
+          left.fadeOut = { duration: overlap, curve: 'equalPower' };
+          c.fadeIn = { duration: overlap, curve: 'equalPower' };
+        }
+      }
+      if (rightId) {
+        const right = t.clips.find((x) => x.id === rightId)!;
+        const overlap = Math.min(clipEnd - right.start, right.duration, c.duration);
+        if (overlap > 0.02) {
+          c.fadeOut = { duration: overlap, curve: 'equalPower' };
+          right.fadeIn = { duration: overlap, curve: 'equalPower' };
+        }
+      }
+      pr.duration = fitDuration(pr);
+    },
+    undo(pr) {
+      const t = findTrack(pr, trackId)!;
+      const c = t.clips.find((x) => x.id === clipId)!;
+      c.start = from;
+      c.fadeIn = fromFadeIn;
+      c.fadeOut = fromFadeOut;
+      if (leftId && leftBefore) {
+        const left = t.clips.find((x) => x.id === leftId);
+        if (left) left.fadeOut = leftBefore;
+      }
+      if (rightId && rightBefore) {
+        const right = t.clips.find((x) => x.id === rightId);
+        if (right) right.fadeIn = rightBefore;
+      }
+    },
+  });
+}
+
 export function trimClip(
   trackId: string,
   clipId: string,

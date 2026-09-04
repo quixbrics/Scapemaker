@@ -11,7 +11,8 @@ import { toggleTheme, currentTheme } from './theme';
 import { restrictedCount } from '../licence/warnings';
 import { openExportDialog } from './dialogs/exportDialog';
 import { history } from '../state/history';
-import { saveProjectToFile } from '../state/persist';
+import { saveProjectToFile, startNewProject } from '../state/persist';
+import { openProjectFile } from './dialogs/openProject';
 
 export class TopBar {
   readonly el: HTMLElement;
@@ -116,6 +117,8 @@ export class TopBar {
           )
         : null;
 
+    const newBtn = h('button', { class: 'btn', ...tt('New project', 'Starts empty. Asks first if you have unsaved changes.'), onclick: () => startNewProject() }, 'New');
+    const openBtn = h('button', { class: 'btn', ...tt('Open project', 'Load a .scapemaker file. Asks first if you have unsaved changes.'), onclick: () => openProjectFile() }, 'Open');
     const save = h('button', { class: 'btn', ...tt('Save project', 'Cmd/Ctrl + S — downloads a .scapemaker file'), onclick: () => saveProjectToFile(store.get().project) }, 'Save');
     const exportBtn = h('button', { class: 'btn-primary', onclick: () => openExportDialog() }, 'Export');
 
@@ -133,6 +136,8 @@ export class TopBar {
       themeSwitch,
       modeSwitch,
       chip ?? document.createComment('no-restrictions'),
+      newBtn,
+      openBtn,
       save,
       exportBtn,
     );

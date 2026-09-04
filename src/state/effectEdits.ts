@@ -91,16 +91,9 @@ export function getLane(t: Track, param: AutomationParam): AutomationLane | unde
   return t.automation.find((l) => l.param === param);
 }
 
-export function setAutomationParam(trackId: string, param: AutomationParam | null): void {
-  store.mutateProject((p) => {
-    const t = track(p, trackId);
-    if (!t) return;
-    // stash the "active" param on the track via a lane that always exists
-    if (param && !getLane(t, param)) {
-      t.automation.push({ param, points: [], enabled: false });
-    }
-    (t as unknown as { _activeParam?: string })._activeParam = param ?? undefined;
-  });
+/** Which track's automation lane is expanded, and which param — pure UI state. */
+export function setAutomationView(trackId: string, param: AutomationParam | null): void {
+  store.patchUi({ automationView: param ? { trackId, param } : null });
 }
 
 export function toggleLane(trackId: string, param: AutomationParam): void {
@@ -118,6 +111,8 @@ export function toggleLane(trackId: string, param: AutomationParam): void {
 }
 
 export function addAutomationPoint(trackId: string, param: AutomationParam, point: AutomationPoint): void {
+  // an eq.* lane needs the EQ chain to exist in the graph for it to have any effect
+  if (param.startsWith('eq.')) ensureEq(trackId);
   const before = structuredClone(track(store.get().project, trackId)?.automation ?? []);
   history.push({
     label: 'Add automation point',

@@ -14,6 +14,15 @@ import { buildEqChain } from './effects/eq';
 import { buildReverb } from './effects/reverb';
 import { scheduleAutomation } from './automation';
 
+/** Band order matches EqSettings.bands: low shelf, low mid, mid, upper mid, high shelf. */
+const EQ_BAND_INDEX: Record<string, number> = {
+  'eq.low': 0,
+  'eq.lowMid': 1,
+  'eq.mid': 2,
+  'eq.highMid': 3,
+  'eq.high': 4,
+};
+
 export function dbToGain(db: number): number {
   return db <= -120 ? 0 : Math.pow(10, db / 20);
 }
@@ -48,6 +57,8 @@ interface TrackChain {
   gain: GainNode;
   panner: StereoPannerNode;
   reverbWet: GainNode;
+  /** low-shelf, 3x peaking, high-shelf — present only when track.eq exists */
+  eqBands?: BiquadFilterNode[];
 }
 
 type BufferResolver = (assetId: string) => AudioBuffer | undefined;
@@ -91,10 +102,12 @@ export function buildGraph(
     // EQ (optional)
     let headNode: AudioNode = trackGain;
     let tailNode: AudioNode = trackGain;
+    let eqBands: BiquadFilterNode[] | undefined;
     if (track.eq) {
       const eq = buildEqChain(ctx, track.eq);
       tailNode.connect(eq.input);
       tailNode = eq.output;
+      eqBands = eq.filters;
     }
     tailNode.connect(panner);
 
@@ -110,10 +123,11 @@ export function buildGraph(
       reverbWet = ctx.createGain(); // detached placeholder for automation targets
     }
 
-    trackChains.set(track.id, { gain: trackGain, panner, reverbWet });
+    const chain: TrackChain = { gain: trackGain, panner, reverbWet, eqBands };
+    trackChains.set(track.id, chain);
 
     // Automation — same scheduler as the offline path.
-    if (audible) scheduleTrackAutomation(track, { gain: trackGain, panner, reverbWet }, opts);
+    if (audible) scheduleTrackAutomation(track, chain, opts);
 
     // Clips
     for (const clip of track.clips) {
@@ -154,8 +168,10 @@ function scheduleTrackAutomation(
       scheduleAutomation(chain.panner.pan, lane, { ...common, transform: (v) => Math.max(-1, Math.min(1, v)) });
     } else if (lane.param === 'reverb.wet') {
       scheduleAutomation(chain.reverbWet.gain, lane, { ...common, transform: (v) => Math.max(0, Math.min(1, v)) });
+    } else if (lane.param.startsWith('eq.')) {
+      const band = chain.eqBands?.[EQ_BAND_INDEX[lane.param]];
+      if (band) scheduleAutomation(band.gain, lane, common); // BiquadFilterNode.gain is already dB
     }
-    // eq.* automation is scheduled inside buildEqChain consumers in a later pass
   }
 }
 

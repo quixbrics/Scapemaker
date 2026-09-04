@@ -14,6 +14,7 @@ import { Inspector } from './inspector';
 import { MasterStrip } from './master';
 import { splitClipAtPlayhead, duplicateClip, deleteClip } from '../state/edits';
 import { openExportDialog } from './dialogs/exportDialog';
+import { openProjectFile } from './dialogs/openProject';
 import { saveProjectToFile, scheduleAutosave } from '../state/persist';
 
 export function mountApp(root: HTMLElement): void {
@@ -55,6 +56,11 @@ function wireKeyboard(): void {
     if (mod && e.key.toLowerCase() === 'e') {
       e.preventDefault();
       openExportDialog();
+      return;
+    }
+    if (mod && e.key.toLowerCase() === 'o') {
+      e.preventDefault();
+      openProjectFile();
       return;
     }
     if (mod && e.key.toLowerCase() === 'z') {

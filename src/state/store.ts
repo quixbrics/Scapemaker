@@ -4,7 +4,7 @@
  * no framework. Panels subscribe and re-render on the slices they care about.
  */
 
-import type { Project } from './project';
+import type { AutomationParam, Project } from './project';
 import { newProject } from './project';
 
 export type Workspace = 'discovery' | 'production';
@@ -15,6 +15,12 @@ export type DiscoveryTab = 'freesound' | 'archive' | 'map' | 'mine';
 export interface Selection {
   trackId: string | null;
   clipId: string | null;
+}
+
+/** Which track (if any) has its automation lane expanded, and which param — pure view state, never persisted or marked dirty. */
+export interface AutomationView {
+  trackId: string;
+  param: AutomationParam;
 }
 
 export interface TransportState {
@@ -33,6 +39,7 @@ export interface UiState {
   discoveryTab: DiscoveryTab;
   snap: boolean;
   selection: Selection;
+  automationView: AutomationView | null;
   /** transient status line, cleared after a timeout */
   toast: { kind: 'info' | 'warn' | 'error'; text: string; id: number } | null;
   savedAt: number | null;
@@ -55,6 +62,7 @@ function initialUi(): UiState {
     discoveryTab: 'mine',
     snap: true,
     selection: { trackId: null, clipId: null },
+    automationView: null,
     toast: null,
     savedAt: null,
     dirty: false,
@@ -121,7 +129,7 @@ class Store {
 
   setProject(project: Project): void {
     this.state.project = project;
-    this.state.ui = { ...this.state.ui, dirty: false, selection: { trackId: null, clipId: null } };
+    this.state.ui = { ...this.state.ui, dirty: false, selection: { trackId: null, clipId: null }, automationView: null };
     this.state.transport = { ...initialTransport() };
     this.emit(new Set(['project', 'ui', 'transport']));
   }

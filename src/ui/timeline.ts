@@ -14,6 +14,7 @@ import { onThemeChange } from './theme';
 import { licenceShort, licenceTone } from '../licence/model';
 import {
   moveClip,
+  moveClipWithCrossfade,
   trimClip,
   splitClipAtPlayhead,
   setTrackGain,
@@ -23,7 +24,17 @@ import {
   addTrack,
   placeAsset,
 } from '../state/edits';
-import type { Clip, Track } from '../state/project';
+import {
+  getLane,
+  setAutomationView,
+  toggleLane,
+  addAutomationPoint,
+  moveAutomationPoint,
+  removeAutomationPoint,
+} from '../state/effectEdits';
+import { evaluateAt } from '../audio/automation';
+import { AUTOMATION_PARAMS, AUTOMATION_PARAM_LIST, toUnit, fromUnit } from './automationParams';
+import type { AutomationParam, Clip, Track } from '../state/project';
 
 const HEAD_W = 178;
 const CLIP_HEAD_H = 15;
@@ -208,6 +219,18 @@ export class Timeline {
   private renderLane(s: AppState, track: Track, pxPerSec: number, bodyW: number): HTMLElement {
     const selected = s.ui.selection.trackId === track.id;
     const hue = `var(--track-${track.index + 1})`;
+    const auto = s.ui.automationView?.trackId === track.id ? s.ui.automationView : null;
+
+    const autoToggle = h(
+      'button',
+      {
+        class: 'ms',
+        ...tt('Automation', 'Draw a curve for gain, pan, EQ or reverb over time'),
+        onclick: () => setAutomationView(track.id, 'gain'),
+      },
+      'A',
+    );
+
     const head = h(
       'div',
       { class: 'lane-head', style: `--track-hue:${hue}` },
@@ -222,22 +245,25 @@ export class Timeline {
           onpointerdown: (e) => e.stopPropagation(),
         }),
       ),
-      h(
-        'div',
-        { class: 'h-ctl' },
-        h(
-          'button',
-          { class: `ms${track.muted ? ' on' : ''}`, ...tt('Mute'), onclick: () => toggleMute(track.id) },
-          'M',
-        ),
-        h(
-          'button',
-          { class: `ms solo${track.solo ? ' on' : ''}`, ...tt('Solo'), onclick: () => toggleSolo(track.id) },
-          'S',
-        ),
-        this.gainSlider(track),
-        h('span', { class: 'h-db' }, fmtDb(track.gain)),
-      ),
+      auto
+        ? this.automationHeadRow(track, auto.param)
+        : h(
+            'div',
+            { class: 'h-ctl' },
+            h(
+              'button',
+              { class: `ms${track.muted ? ' on' : ''}`, ...tt('Mute'), onclick: () => toggleMute(track.id) },
+              'M',
+            ),
+            h(
+              'button',
+              { class: `ms solo${track.solo ? ' on' : ''}`, ...tt('Solo'), onclick: () => toggleSolo(track.id) },
+              'S',
+            ),
+            autoToggle,
+            this.gainSlider(track),
+            h('span', { class: 'h-db' }, fmtDb(track.gain)),
+          ),
     );
 
     const body = h('div', { class: 'lane-body' });
@@ -248,6 +274,7 @@ export class Timeline {
     for (const clip of track.clips) {
       body.append(this.renderClip(s, track, clip, pxPerSec, bodyW));
     }
+    if (auto) body.append(this.automationOverlay(s, track, auto.param));
 
     const lane = h(
       'div',
@@ -261,6 +288,110 @@ export class Timeline {
       }
     });
     return lane;
+  }
+
+  private automationHeadRow(track: Track, param: AutomationParam): HTMLElement {
+    const lane = getLane(track, param);
+    const meta = AUTOMATION_PARAMS[param];
+    return h(
+      'div',
+      { class: 'h-ctl auto-row' },
+      h('span', { class: 'mono-cap' }, 'AUTOMATION'),
+      h(
+        'select',
+        {
+          class: 'auto-select',
+          onchange: (e) => setAutomationView(track.id, (e.target as HTMLSelectElement).value as AutomationParam),
+        },
+        ...AUTOMATION_PARAM_LIST.map((p) => h('option', { value: p, selected: p === param }, AUTOMATION_PARAMS[p].label)),
+      ),
+      h(
+        'button',
+        {
+          class: `toggle${lane?.enabled ? ' on' : ''}`,
+          ...tt('Enable', lane?.enabled ? 'Curve is applied on playback and export' : `Draw a point to enable — range ${meta.format(meta.min)} to ${meta.format(meta.max)}`),
+          onclick: () => toggleLane(track.id, param),
+        },
+        h('span', { class: 'knob' }),
+      ),
+      h('button', { class: 'linkish', style: 'margin-left:auto;font-size:10px', onclick: () => setAutomationView(track.id, null) }, 'close'),
+    );
+  }
+
+  private automationOverlay(s: AppState, track: Track, param: AutomationParam): HTMLElement {
+    const dur = s.project.duration || 1;
+    const meta = AUTOMATION_PARAMS[param];
+    const lane = getLane(track, param);
+    const points = lane?.points ?? [];
+
+    const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+    svg.setAttribute('viewBox', '0 0 1000 100');
+    svg.setAttribute('preserveAspectRatio', 'none');
+    svg.setAttribute('class', 'auto-svg');
+
+    if (points.length > 0) {
+      const N = 200;
+      const pts: string[] = [];
+      for (let i = 0; i <= N; i++) {
+        const t = (i / N) * dur;
+        const v = evaluateAt(points, t);
+        const x = (t / dur) * 1000;
+        const y = 100 - toUnit(param, v) * 100;
+        pts.push(`${x.toFixed(1)},${y.toFixed(1)}`);
+      }
+      const poly = document.createElementNS('http://www.w3.org/2000/svg', 'polyline');
+      poly.setAttribute('points', pts.join(' '));
+      poly.setAttribute('class', 'auto-poly');
+      poly.setAttribute('vector-effect', 'non-scaling-stroke');
+      svg.append(poly);
+    }
+
+    const overlay = h('div', { class: `auto-overlay${lane?.enabled === false ? ' dim' : ''}` }, svg);
+
+    // click empty overlay space to add a point
+    overlay.addEventListener('dblclick', (e) => {
+      const rect = overlay.getBoundingClientRect();
+      const time = ((e.clientX - rect.left) / rect.width) * dur;
+      const unit = 1 - (e.clientY - rect.top) / rect.height;
+      addAutomationPoint(track.id, param, {
+        time: Math.max(0, time),
+        value: fromUnit(param, unit),
+        interpolation: 'linear',
+      });
+    });
+
+    // handles
+    points.forEach((p, i) => {
+      const x = (p.time / dur) * 100;
+      const y = 100 - toUnit(param, p.value) * 100;
+      const handle = h('div', {
+        class: 'auto-handle',
+        style: `left:${x}%;top:${y}%`,
+        ...tt(meta.format(p.value), `${timecode(p.time, false)} — drag to move, double-click to remove`),
+      });
+      handle.addEventListener('dblclick', (e) => {
+        e.stopPropagation();
+        removeAutomationPoint(track.id, param, i);
+      });
+      handle.addEventListener('pointerdown', (e) => {
+        e.stopPropagation();
+        const rect = overlay.getBoundingClientRect();
+        const move = (ev: PointerEvent) => {
+          const time = Math.max(0, ((ev.clientX - rect.left) / rect.width) * dur);
+          const unit = 1 - (ev.clientY - rect.top) / rect.height;
+          moveAutomationPoint(track.id, param, i, time, fromUnit(param, unit));
+        };
+        const up = () => {
+          window.removeEventListener('pointermove', move);
+          window.removeEventListener('pointerup', up);
+        };
+        window.addEventListener('pointermove', move);
+        window.addEventListener('pointerup', up);
+      });
+      overlay.append(handle);
+    });
+
+    return overlay;
   }
 
   private gainSlider(track: Track): HTMLElement {
@@ -328,11 +459,34 @@ export class Timeline {
       headBits.push(h('span', { class: 'c-coord' }, fmtCoord(ref.location.lat, ref.location.lon)));
     }
 
+    const fadeWedges: HTMLElement[] = [];
+    if (clip.fadeIn.duration > 0) {
+      const w = Math.min(100, (clip.fadeIn.duration / clip.duration) * 100);
+      fadeWedges.push(
+        h('div', {
+          class: 'fade-wedge in',
+          style: `width:${w}%;background:linear-gradient(90deg, var(--bg), transparent)`,
+          ...tt('Fade in', `${clip.fadeIn.curve === 'equalPower' ? 'Equal-power' : 'Linear'} — ${clip.fadeIn.duration.toFixed(2)}s`),
+        }),
+      );
+    }
+    if (clip.fadeOut.duration > 0) {
+      const w = Math.min(100, (clip.fadeOut.duration / clip.duration) * 100);
+      fadeWedges.push(
+        h('div', {
+          class: 'fade-wedge out',
+          style: `width:${w}%;background:linear-gradient(270deg, var(--bg), transparent)`,
+          ...tt('Fade out', `${clip.fadeOut.curve === 'equalPower' ? 'Equal-power' : 'Linear'} — ${clip.fadeOut.duration.toFixed(2)}s`),
+        }),
+      );
+    }
+
     const el = h(
       'div',
       { class: `clip${selected ? ' sel' : ''}`, style, 'data-clip': clip.id },
       h('div', { class: 'clip-head' }, ...headBits),
       canvas,
+      ...fadeWedges,
       h('div', { class: 'trim-handle l', 'data-edge': 'start' }),
       h('div', { class: 'trim-handle r', 'data-edge': 'end' }),
     );
@@ -400,11 +554,13 @@ export class Timeline {
     }
 
     const mode: 'move' | 'trim-start' | 'trim-end' =
-      edge === 'start' || (tool === 'trim' && this.nearLeft(e))
-        ? 'trim-start'
-        : edge === 'end' || tool === 'trim'
-          ? 'trim-end'
-          : 'move';
+      tool === 'crossfade'
+        ? 'move'
+        : edge === 'start' || (tool === 'trim' && this.nearLeft(e))
+          ? 'trim-start'
+          : edge === 'end' || tool === 'trim'
+            ? 'trim-end'
+            : 'move';
 
     const move = (ev: PointerEvent) => {
       const dxSec = (ev.clientX - startX) / pxPerSec;
@@ -418,7 +574,9 @@ export class Timeline {
       window.removeEventListener('pointerup', up);
       const dxSec = (ev.clientX - startX) / pxPerSec;
       if (Math.abs(ev.clientX - startX) < 3 && mode === 'move') return; // pure click
-      if (mode === 'move') {
+      if (mode === 'move' && tool === 'crossfade') {
+        moveClipWithCrossfade(track.id, clip.id, this.snap(originStart + dxSec));
+      } else if (mode === 'move') {
         // possible cross-track move
         const overLane = document.elementFromPoint(ev.clientX, ev.clientY)?.closest('.lane') as HTMLElement | null;
         const targetTrackId = overLane?.dataset.track ?? track.id;
