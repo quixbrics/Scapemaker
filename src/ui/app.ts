@@ -70,6 +70,12 @@ function wireKeyboard(): void {
       openProjectFile();
       return;
     }
+    // Everything below this line belongs to the timeline, not to text. Only
+    // Save / Export / Open are global enough to fire while a field has focus —
+    // undo and split in particular must leave the field's own editing alone,
+    // or writing a reflection would lose text to a project-level undo.
+    if (typing) return;
+
     if (mod && e.key.toLowerCase() === 'z') {
       e.preventDefault();
       if (e.shiftKey) history.redo();
@@ -81,8 +87,6 @@ function wireKeyboard(): void {
       splitClipAtPlayhead();
       return;
     }
-    if (typing) return; // never steal Cmd+C/V or anything else from a text field
-
     if (mod && e.key.toLowerCase() === 'c') {
       e.preventDefault();
       copySelectedClip();
