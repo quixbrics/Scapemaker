@@ -46,7 +46,11 @@ export function openExportDialog(): void {
           status.textContent = `${label}…`;
           (bar.firstChild as HTMLElement).style.width = `${Math.round(frac * 100)}%`;
         });
-        status.textContent = `Done — ${report.files.length} file${report.files.length === 1 ? '' : 's'} downloaded.` +
+        const n = report.files.length;
+        status.textContent =
+          (report.archive
+            ? `Done — ${n} files downloaded as ${report.archive}.`
+            : `Done — ${n} file${n === 1 ? '' : 's'} downloaded.`) +
           (report.clipped ? `  ⚠ mixdown peaks at ${report.peakDb.toFixed(1)} dB (clipping).` : '');
         (bar.firstChild as HTMLElement).style.width = '100%';
       } catch (err) {
