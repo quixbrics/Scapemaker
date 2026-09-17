@@ -48,6 +48,9 @@ import type { SoundResult } from '../sources/types';
 const HEAD_W = 178;
 const CLIP_HEAD_H = 15;
 
+/** Tools that only appear in Advanced. */
+const ADVANCED_TOOLS = new Set(['crossfade', 'loop']);
+
 export class Timeline {
   readonly el: HTMLElement;
   private lanesScroll!: HTMLElement;
@@ -120,6 +123,9 @@ export class Timeline {
     return JSON.stringify({
       d: s.project.duration,
       z: s.project.view.zoom,
+      // Basic hides the automation button, so the lanes must rebuild on a
+      // mode switch.
+      m: s.ui.mode,
       av: s.ui.automationView,
       p: s.pendingImports.map((x) => [x.trackId, x.start, x.duration, x.phase, Math.round(x.fraction * 50)]),
       t: s.project.tracks.map((t) => [
@@ -231,7 +237,12 @@ export class Timeline {
 
   /** In-place patch only — never replaces a node. */
   private renderToolbar(s: AppState): void {
-    for (const [id, btn] of this.toolButtons) btn.classList.toggle('active', s.ui.tool === id);
+    for (const [id, btn] of this.toolButtons) {
+      btn.classList.toggle('active', s.ui.tool === id);
+      // Basic keeps the three tools a first soundscape needs. Crossfade and
+      // loop are the ones that need explaining before they are useful.
+      btn.hidden = s.ui.mode === 'basic' && ADVANCED_TOOLS.has(id);
+    }
     this.snapBtn.classList.toggle('on', s.ui.snap);
     const nEmpty = s.project.tracks.filter((t) => t.clips.length).length;
     const nClips = s.project.tracks.reduce((n, t) => n + t.clips.length, 0);
@@ -356,15 +367,18 @@ export class Timeline {
     const hue = `var(--track-${track.index + 1})`;
     const auto = s.ui.automationView?.trackId === track.id ? s.ui.automationView : null;
 
-    const autoToggle = h(
-      'button',
-      {
-        class: 'ms',
-        ...tt('Automation', 'Draw a curve for gain, pan, EQ or reverb over time'),
-        onclick: () => setAutomationView(track.id, 'gain'),
-      },
-      'A',
-    );
+    const autoToggle =
+      s.ui.mode === 'advanced'
+        ? h(
+            'button',
+            {
+              class: 'ms',
+              ...tt('Automation', 'Draw a curve for gain, pan, EQ or reverb over time'),
+              onclick: () => setAutomationView(track.id, 'gain'),
+            },
+            'A',
+          )
+        : null;
 
     const head = h(
       'div',

@@ -105,8 +105,24 @@ export class TopBar {
     const modeSwitch = h(
       'div',
       { class: 'segmented' },
-      h('button', { class: s.ui.mode === 'basic' ? 'active' : '', onclick: () => store.patchUi({ mode: 'basic' }) }, 'Basic'),
-      h('button', { class: s.ui.mode === 'advanced' ? 'active' : '', onclick: () => store.patchUi({ mode: 'advanced' }) }, 'Advanced'),
+      h(
+        'button',
+        {
+          class: s.ui.mode === 'basic' ? 'active' : '',
+          ...tt('Basic', 'Select, trim and split, with gain and fades. Enough for a first soundscape.'),
+          onclick: () => setMode('basic'),
+        },
+        'Basic',
+      ),
+      h(
+        'button',
+        {
+          class: s.ui.mode === 'advanced' ? 'active' : '',
+          ...tt('Advanced', 'Adds crossfade and loop, automation curves, EQ and reverb.'),
+          onclick: () => setMode('advanced'),
+        },
+        'Advanced',
+      ),
     );
 
     const rc = restrictedCount(s.project);
@@ -222,6 +238,21 @@ export class TopBar {
   private rename(): void {
     const next = window.prompt('Project name', store.get().project.name);
     if (next && next.trim()) store.mutateProject((p) => (p.name = next.trim()));
+  }
+}
+
+/**
+ * Basic hides the crossfade and loop tools and the automation lanes, so
+ * dropping into it while one of them is in use would leave the student
+ * holding a tool with no button and no way back to it.
+ */
+function setMode(mode: 'basic' | 'advanced'): void {
+  const { ui } = store.get();
+  if (mode === 'basic') {
+    const tool = ui.tool === 'crossfade' || ui.tool === 'loop' ? 'select' : ui.tool;
+    store.patchUi({ mode, tool, automationView: null });
+  } else {
+    store.patchUi({ mode });
   }
 }
 

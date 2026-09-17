@@ -134,13 +134,15 @@ function wireKeyboard(): void {
       case 'T':
         store.patchUi({ tool: 'trim' });
         break;
+      // Crossfade and loop only exist in Advanced; their shortcuts should not
+      // select a tool whose button is not on screen.
       case 'f':
       case 'F':
-        store.patchUi({ tool: 'crossfade' });
+        if (store.get().ui.mode === 'advanced') store.patchUi({ tool: 'crossfade' });
         break;
       case 'r':
       case 'R':
-        store.patchUi({ tool: 'loop' });
+        if (store.get().ui.mode === 'advanced') store.patchUi({ tool: 'loop' });
         break;
       case 'l':
       case 'L':
