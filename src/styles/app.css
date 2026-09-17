@@ -413,3 +413,7 @@
 .mem.warn .mono-cap { color: var(--warn); }
 .mem.danger .mem-fill { background: var(--danger); }
 .mem.danger .mono-cap { color: var(--danger); }
+
+/* The live region is a wrapper only — .toast inside it is position:fixed. */
+.toast-region { position: fixed; inset: auto; pointer-events: none; }
+.toast-region .toast { pointer-events: auto; }

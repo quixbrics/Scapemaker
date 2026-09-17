@@ -375,6 +375,7 @@ export class Timeline {
         h('input', {
           class: 'h-name',
           value: track.name,
+          'aria-label': `Track ${track.index + 1} name`,
           onchange: (e) => renameTrack(track.id, (e.target as HTMLInputElement).value),
           onpointerdown: (e) => e.stopPropagation(),
         }),
@@ -551,11 +552,16 @@ export class Timeline {
         max: '6',
         step: '0.5',
         value: String(track.gain),
+        'aria-label': `${track.name} gain, decibels`,
+        // A bare "-6" is meaningless read aloud; say the unit.
+        'aria-valuetext': `${fmtDb(track.gain)} dB`,
         oninput: (e) => {
-          const db = Number((e.target as HTMLInputElement).value);
+          const input = e.target as HTMLInputElement;
+          const db = Number(input.value);
           // update our own readout so the lane doesn't need rebuilding mid-drag
           fill.style.width = `${toPct(db)}%`;
           dbReadout.textContent = fmtDb(db);
+          input.setAttribute('aria-valuetext', `${fmtDb(db)} dB`);
           setTrackGain(track.id, db);
         },
         onpointerdown: (e) => e.stopPropagation(),

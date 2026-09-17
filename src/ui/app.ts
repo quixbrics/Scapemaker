@@ -184,17 +184,21 @@ function wireKeyboard(): void {
 }
 
 function wireToast(): void {
-  let el: HTMLElement | null = null;
+  // A live region so the message is announced, not merely drawn. Errors and
+  // warnings interrupt; an ordinary confirmation waits its turn.
+  const region = h('div', {
+    class: 'toast-region',
+    role: 'status',
+    'aria-live': 'polite',
+    'aria-atomic': 'true',
+  });
+  document.body.append(region);
+
   store.subscribe((s, changed) => {
     if (!changed.has('ui')) return;
     const t = s.ui.toast;
-    if (el) {
-      el.remove();
-      el = null;
-    }
-    if (t) {
-      el = h('div', { class: `toast ${t.kind === 'info' ? '' : t.kind}` }, t.text);
-      document.body.append(el);
-    }
+    region.setAttribute('aria-live', t && t.kind !== 'info' ? 'assertive' : 'polite');
+    region.replaceChildren();
+    if (t) region.append(h('div', { class: `toast ${t.kind === 'info' ? '' : t.kind}` }, t.text));
   });
 }

@@ -89,18 +89,33 @@ export function installTooltips(): void {
     return null;
   };
 
-  document.addEventListener('pointerover', (e) => {
+  const open = (e: Event, delay: number) => {
     const t = findTrigger(e);
     if (!t || t === current) return;
     current = t;
     if (showTimer) clearTimeout(showTimer);
     showTimer = setTimeout(() => {
       if (current === t) render(t);
-    }, 400);
-  });
+    }, delay);
+  };
+
+  document.addEventListener('pointerover', (e) => open(e, 400));
   document.addEventListener('pointerout', (e) => {
     const t = findTrigger(e);
     if (t && t === current) hide();
+  });
+
+  // Keyboard users never saw any of this: the hints only existed on hover.
+  // No delay on focus — the student has already committed to the control by
+  // tabbing to it, so there is nothing to debounce.
+  document.addEventListener('focusin', (e) => open(e, 0));
+  document.addEventListener('focusout', (e) => {
+    const t = findTrigger(e);
+    if (t && t === current) hide();
+  });
+  // Escape dismisses a tip without moving focus.
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') hide();
   });
   document.addEventListener('pointerdown', hide, true);
   window.addEventListener('scroll', hide, true);

@@ -26,7 +26,38 @@ export function h<K extends keyof HTMLElementTagNameMap>(
     if (c == null || c === false) continue;
     el.append(c instanceof Node ? c : document.createTextNode(String(c)));
   }
+  nameFromTooltip(el);
   return el;
+}
+
+/** Controls that carry their own accessible name in their text content. */
+const NAMED_BY_TOOLTIP = new Set(['BUTTON', 'A', 'INPUT', 'SELECT', 'TEXTAREA', 'SUMMARY']);
+
+/**
+ * Most controls here are icon-only: svgIcon marks its SVG aria-hidden, so a
+ * button holding nothing else had NO accessible name at all — a screen reader
+ * announced "button" for play, stop, mute, solo and every tool. The tooltip
+ * title is already a good, human name for each, so use it.
+ *
+ * Only for real controls: aria-label on a plain div is ignored without a role,
+ * and `tt` is used on plenty of decorative spans (fade wedges, loop ticks).
+ * An explicit aria-label always wins.
+ */
+function nameFromTooltip(el: HTMLElement): void {
+  if (!NAMED_BY_TOOLTIP.has(el.tagName)) return;
+  if (el.hasAttribute('aria-label') || el.hasAttribute('aria-labelledby')) return;
+  const title = el.dataset.tt;
+  if (!title) return;
+  // WCAG 2.5.3: the accessible name must contain the visible label. Every
+  // tooltip title here either expands the visible text ("Save" -> "Save
+  // project") or replaces a bare glyph, so the check is cheap insurance
+  // against a future title that drifts from its button.
+  const visible = (el.textContent ?? '').trim();
+  if (visible && !title.toLowerCase().includes(visible.toLowerCase())) {
+    el.setAttribute('aria-label', `${visible} — ${title}`);
+  } else {
+    el.setAttribute('aria-label', title);
+  }
 }
 
 export function clear(el: Element): void {
