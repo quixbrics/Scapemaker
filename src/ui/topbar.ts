@@ -32,6 +32,8 @@ export class TopBar {
   private tcMain!: HTMLElement;
   private tcFrac!: HTMLElement;
   private tcTotal!: HTMLElement;
+  private undoBtn!: HTMLButtonElement;
+  private redoBtn!: HTMLButtonElement;
 
   constructor() {
     this.el = h('div', { class: 'topbar' });
@@ -41,6 +43,11 @@ export class TopBar {
       if (changed.has('ui') || changed.has('project')) this.render(s);
       if (changed.has('transport')) this.updateTransport(s);
     });
+    // history.push() mutates the project BEFORE putting the command on the
+    // stack, so the render triggered by that mutation still saw the previous
+    // command: the Undo button showed the wrong label and stayed disabled for
+    // one edit after the first. The stack has its own notifier — use it.
+    history.subscribe(() => this.updateHistory());
   }
 
   /** Full rebuild — only for structural (ui/project) changes, never per-frame. */
@@ -168,32 +175,32 @@ export class TopBar {
   }
 
   private undoRedo(): HTMLElement {
-    return h(
-      'div',
-      { class: 'transport' },
-      h(
-        'button',
-        {
-          class: 'tbtn',
-          ...tt('Undo', history.undoLabel ?? 'Nothing to undo'),
-          disabled: !history.canUndo,
-          onclick: () => history.undo(),
-          style: history.canUndo ? '' : 'opacity:.35',
-        },
-        '⟲',
-      ),
-      h(
-        'button',
-        {
-          class: 'tbtn',
-          ...tt('Redo', history.redoLabel ?? 'Nothing to redo'),
-          disabled: !history.canRedo,
-          onclick: () => history.redo(),
-          style: history.canRedo ? '' : 'opacity:.35',
-        },
-        '⟳',
-      ),
-    );
+    this.undoBtn = h(
+      'button',
+      { class: 'tbtn', 'aria-label': 'Undo', onclick: () => history.undo() },
+      '⟲',
+    ) as HTMLButtonElement;
+    this.redoBtn = h(
+      'button',
+      { class: 'tbtn', 'aria-label': 'Redo', onclick: () => history.redo() },
+      '⟳',
+    ) as HTMLButtonElement;
+    this.updateHistory();
+    return h('div', { class: 'transport' }, this.undoBtn, this.redoBtn);
+  }
+
+  /** In-place patch — safe to call from the history notifier at any time. */
+  private updateHistory(): void {
+    if (!this.undoBtn || !this.redoBtn) return;
+    const apply = (btn: HTMLButtonElement, can: boolean, label: string, what: string | null) => {
+      btn.disabled = !can;
+      btn.style.opacity = can ? '' : '.35';
+      btn.dataset.tt = label;
+      btn.dataset.ttSub = what ?? `Nothing to ${label.toLowerCase()}`;
+      btn.setAttribute('aria-label', what ? `${label} ${what}` : `${label} (unavailable)`);
+    };
+    apply(this.undoBtn, history.canUndo, 'Undo', history.undoLabel);
+    apply(this.redoBtn, history.canRedo, 'Redo', history.redoLabel);
   }
 
   private rename(): void {

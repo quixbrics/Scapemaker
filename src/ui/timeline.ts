@@ -59,6 +59,7 @@ export class Timeline {
   private rafPlayhead = 0;
   private unsubTheme: () => void;
   private lastSig = '';
+  private lastProjectId = '';
 
   constructor() {
     this.el = h('div', { class: 'centre' });
@@ -67,7 +68,15 @@ export class Timeline {
     this.buildLanes();
     this.unsubTheme = onThemeChange(() => this.renderLanes(store.get()));
     this.lastSig = this.laneSignature(store.get());
+    this.lastProjectId = store.get().project.id;
     store.subscribe((s, changed) => {
+      if (changed.has('project') && s.project.id !== this.lastProjectId) {
+        this.lastProjectId = s.project.id;
+        // A different project: put the view back where it was saved.
+        requestAnimationFrame(() => {
+          this.lanesScroll.scrollLeft = s.project.view.scrollX * this.pxPerSec(s);
+        });
+      }
       if (changed.has('project') || changed.has('ui')) {
         this.renderToolbar(s);
         // Only tear the lanes down when their STRUCTURE actually changed.
@@ -296,6 +305,13 @@ export class Timeline {
     // keep the ruler locked to the lanes' horizontal scroll
     this.lanesScroll.addEventListener('scroll', () => {
       if (this.rulerViewport) this.rulerViewport.scrollLeft = this.lanesScroll.scrollLeft;
+      // Remember where the student was looking. `view.scrollX` was in the
+      // schema and saved to every project file, but nothing ever wrote or read
+      // it. Not an undoable edit and not a reason to mark the file dirty.
+      const seconds = this.lanesScroll.scrollLeft / this.pxPerSec(store.get());
+      if (Math.abs(seconds - store.get().project.view.scrollX) > 0.01) {
+        store.mutateProject((p) => (p.view.scrollX = seconds), { markDirty: false });
+      }
     });
     const wrap = h('div', { class: 'lanes-wrap' }, this.lanesScroll);
     this.el.append(wrap);
@@ -778,18 +794,35 @@ export class Timeline {
               : 'move';
 
     const originSpan = loopSpan(clip);
+    const originOffset = clip.sourceOffset;
+    // How far each edge can travel: into the asset at the head, and up to the
+    // asset's end at the tail. Matches the clamps in edits.trimClip, so the
+    // preview cannot promise a trim the commit will refuse.
+    const assetDuration = assetStore.peek(clip.assetId)?.buffer.duration ?? originOffset + clip.duration;
     const clipEl = e.currentTarget as HTMLElement;
+    const pct = (seconds: number) => `${((seconds / dur) * 100).toFixed(3)}%`;
+
     const move = (ev: PointerEvent) => {
       const dxSec = (ev.clientX - startX) / pxPerSec;
+      const moved = Math.abs(ev.clientX - startX) >= 3;
+      if (moved) clipEl.classList.add('dragging');
+
       if (mode === 'move') {
-        if (Math.abs(ev.clientX - startX) >= 3) clipEl.classList.add('dragging');
-        clipEl.style.left = `${((this.snap(originStart + dxSec) / dur) * 100).toFixed(3)}%`;
+        clipEl.style.left = pct(this.snap(originStart + dxSec));
       } else if (mode === 'loop') {
-        if (Math.abs(ev.clientX - startX) >= 3) clipEl.classList.add('dragging');
         const targetSpan = Math.max(clip.duration, originSpan + dxSec);
         const count = loopCountForSpan(clip.duration, clip.loop?.crossfade ?? 0.05, targetSpan);
         const snappedSpan = count === 1 ? clip.duration : clip.duration + (count - 1) * (clip.duration - (clip.loop?.crossfade ?? 0.05));
-        clipEl.style.width = `${((snappedSpan / dur) * 100).toFixed(3)}%`;
+        clipEl.style.width = pct(snappedSpan);
+      } else if (mode === 'trim-start') {
+        // Trimming used to show nothing at all until the pointer came up.
+        const d = Math.max(-originOffset, Math.min(dxSec, clip.duration - 0.05));
+        clipEl.style.left = pct(originStart + d);
+        clipEl.style.width = pct(clip.duration - d);
+      } else {
+        const room = assetDuration - (originOffset + clip.duration);
+        const d = Math.max(-(clip.duration - 0.05), Math.min(dxSec, room));
+        clipEl.style.width = pct(clip.duration + d);
       }
     };
     const up = (ev: PointerEvent) => {
@@ -832,6 +865,31 @@ export class Timeline {
     if (!this.lanesInner) return;
     const laneHead = this.lanesInner.querySelector<HTMLElement>('.playhead[data-lanes]');
     if (laneHead) laneHead.style.left = `${(HEAD_W + frac * bodyW).toFixed(1)}px`;
+    if (s.transport.playing) this.followPlayhead(frac * bodyW);
+  }
+
+  /**
+   * Keep the playhead on screen while the mix runs. Zoomed in, it used to walk
+   * straight off the right-hand edge and the student lost sight of it for the
+   * rest of the take.
+   *
+   * Only while playing, and only when the playhead actually leaves the visible
+   * band: scrolling on every frame would fight the student's own scrolling.
+   */
+  private followPlayhead(xPx: number): void {
+    const view = this.lanesScroll;
+    const width = view.clientWidth - HEAD_W;
+    if (width <= 0) return;
+    const left = view.scrollLeft;
+    const margin = Math.min(120, width * 0.12);
+
+    if (xPx > left + width - margin) {
+      // Jump a page rather than creep, so the picture is stable to read.
+      view.scrollLeft = Math.max(0, xPx - margin);
+    } else if (xPx < left) {
+      // Looped back, or seeked behind the viewport.
+      view.scrollLeft = Math.max(0, xPx - margin);
+    }
   }
 
   private loopPlayhead(): void {
