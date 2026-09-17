@@ -51,15 +51,35 @@ export function token(name: string): string {
   return getComputedStyle(document.documentElement).getPropertyValue(name).trim();
 }
 
-/** Resolve a token to `rgba()` with an alpha override. */
-export function tokenAlpha(name: string, alpha: number): string {
-  const c = token(name);
+/**
+ * Token resolved to `rgb` components, cached per theme.
+ *
+ * Resolving one meant appending a div to the body and reading its computed
+ * colour — a forced style recalculation, and the master heatmap calls it once
+ * per bucket on every repaint. The cache is cleared whenever the theme
+ * changes, which is the only time these values can move.
+ */
+const rgbCache = new Map<string, string | null>();
+listeners.add(() => rgbCache.clear());
+
+function tokenRgb(name: string): string | null {
+  const key = `${currentTheme()}:${name}`;
+  const hit = rgbCache.get(key);
+  if (hit !== undefined) return hit;
+
   const el = document.createElement('div');
-  el.style.color = c;
+  el.style.color = token(name);
   document.body.appendChild(el);
   const rgb = getComputedStyle(el).color;
   el.remove();
   const m = rgb.match(/(\d+),\s*(\d+),\s*(\d+)/);
-  if (!m) return c;
-  return `rgba(${m[1]}, ${m[2]}, ${m[3]}, ${alpha})`;
+  const value = m ? `${m[1]}, ${m[2]}, ${m[3]}` : null;
+  rgbCache.set(key, value);
+  return value;
+}
+
+/** Resolve a token to `rgba()` with an alpha override. */
+export function tokenAlpha(name: string, alpha: number): string {
+  const rgb = tokenRgb(name);
+  return rgb ? `rgba(${rgb}, ${alpha})` : token(name);
 }

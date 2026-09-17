@@ -18,6 +18,20 @@ import { contentEnd } from '../state/project';
 import { setMasterGain } from '../state/edits';
 
 const HEAD_W = 178;
+/** Long enough that a run of small edits analyses once, short enough to feel live. */
+const ANALYSIS_DEBOUNCE_MS = 400;
+
+/**
+ * Run when the browser is not busy, but never later than `timeout`.
+ * requestIdleCallback is absent in Safari <16.4, so fall back to a timer.
+ */
+function whenIdle(fn: () => void, timeout = 1500): void {
+  const ric = (window as unknown as {
+    requestIdleCallback?: (cb: () => void, opts?: { timeout: number }) => number;
+  }).requestIdleCallback;
+  if (ric) ric(fn, { timeout });
+  else setTimeout(fn, 0);
+}
 
 export class MasterStrip {
   readonly el: HTMLElement;
@@ -28,6 +42,9 @@ export class MasterStrip {
   private analysis: BufferAnalysis | null = null;
   private analysing = false;
   private lastSig = '';
+  /** the signature still owed an analysis, or null when the meters are current */
+  private wantedSig: string | null = null;
+  private queued: ReturnType<typeof setTimeout> | null = null;
 
   constructor() {
     this.el = h('div', { class: 'master' });
@@ -49,44 +66,88 @@ export class MasterStrip {
 
   dispose(): void {
     cancelAnimationFrame(this.raf);
+    if (this.queued) clearTimeout(this.queued);
   }
 
+  /**
+   * What the meters actually depend on. Anything outside this (a rename, a
+   * selection, the reflection text) must not trigger a re-render of the mix.
+   */
+  private analysisSignature(p: ReturnType<typeof store.get>['project']): string {
+    return JSON.stringify({
+      master: p.masterGain,
+      tracks: p.tracks.map((t) => ({
+        g: t.gain,
+        m: t.muted,
+        s: t.solo,
+        pan: t.pan,
+        eq: t.eq,
+        rv: t.reverb,
+        a: t.automation,
+        c: t.clips,
+      })),
+    });
+  }
+
+  /**
+   * Analysing the mix means rendering the WHOLE project offline, which on a
+   * three-minute eight-track piece is seconds of CPU. So: debounce, never
+   * start while the transport is running or a gesture is in flight, and wait
+   * for an idle moment.
+   *
+   * `wantedSig` is the signature still owed an analysis. The previous version
+   * wrote lastSig before bailing on an in-flight render, so a change arriving
+   * mid-analysis was recorded as done and never analysed — the readouts then
+   * described the second-to-last state until something else was edited.
+   */
   private scheduleAnalysis(): void {
     const p = store.get().project;
-    const sig = JSON.stringify({
-      master: p.masterGain,
-      tracks: p.tracks.map((t) => ({ g: t.gain, m: t.muted, s: t.solo, c: t.clips })),
-    });
+    const sig = this.analysisSignature(p);
     if (sig === this.lastSig) return;
-    this.lastSig = sig;
+    this.wantedSig = sig;
+
     if (contentEnd(p) < 0.1) {
+      this.lastSig = sig;
       this.analysis = null;
       this.renderHead(-Infinity, -Infinity, null);
       this.paintHeat();
       return;
     }
+    if (this.analysing) return; // the in-flight run will pick up wantedSig
+    this.queueAnalysis();
+  }
+
+  private queueAnalysis(): void {
+    if (this.queued) clearTimeout(this.queued);
+    this.queued = setTimeout(() => {
+      this.queued = null;
+      whenIdle(() => void this.runAnalysis());
+    }, ANALYSIS_DEBOUNCE_MS);
+  }
+
+  private async runAnalysis(): Promise<void> {
     if (this.analysing) return;
+    // Never compete with the audio thread or a drag.
+    if (store.get().transport.playing || isInteracting()) {
+      this.queueAnalysis();
+      return;
+    }
+    const sig = this.wantedSig;
+    if (sig === null || sig === this.lastSig) return;
+
     this.analysing = true;
-    // A full offline render is expensive; hold off while the mix is playing or
-    // the user is dragging something, so it never competes with the audio
-    // thread or a gesture.
-    window.setTimeout(async () => {
-      if (store.get().transport.playing || isInteracting()) {
-        this.analysing = false;
-        this.lastSig = '';           // re-check once things settle
-        setTimeout(() => this.scheduleAnalysis(), 600);
-        return;
-      }
-      try {
-        const buf = await renderProject(store.get().project, {});
-        this.analysis = analyseBuffer(buf);
-        this.paintOffline(buf);
-      } catch {
-        /* leave last analysis */
-      } finally {
-        this.analysing = false;
-      }
-    }, 250);
+    try {
+      const buf = await renderProject(store.get().project, {});
+      this.analysis = analyseBuffer(buf);
+      this.lastSig = sig;
+      this.paintOffline(buf);
+    } catch {
+      /* leave last analysis */
+    } finally {
+      this.analysing = false;
+    }
+    // The project moved on while we were rendering; go round again.
+    if (this.wantedSig !== this.lastSig) this.queueAnalysis();
   }
 
   private paintOffline(buf: AudioBuffer): void {

@@ -10,8 +10,16 @@
     rel="stylesheet"
     href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap"
   />
-  <link rel="stylesheet" href="/src/styles/tokens.css" />
-  <link rel="stylesheet" href="/src/styles/base.css" />
+  <!-- Styles come in through main.ts, which is what Vite bundles and
+       fingerprints; the source-path <link>s that used to sit here were
+       redundant (Vite folded them into the same bundle). What is left is just
+       enough inline to avoid a flash of white before that bundle lands — the
+       real values live in tokens.css and take over the moment it does. -->
+  <style>
+    html, body { height: 100%; margin: 0; }
+    body { background: #0d1117; color: #dce4ec; }        /* --bg / --text, dark */
+    html[data-theme='light'] body { background: #f6f8fa; color: #17202a; }
+  </style>
 </head>
 <body>
   <div id="app" aria-busy="true"></div>

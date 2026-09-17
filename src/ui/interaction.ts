@@ -30,12 +30,28 @@ export function onGestureEnd(key: string, fn: () => void): void {
   else pending.set(key, fn);
 }
 
+/**
+ * What counts as a drag. Range inputs were the only thing tracked, so a clip
+ * drag, a trim, a ruler scrub and an automation-point drag all read as "idle"
+ * — which let the master strip start a full offline render of the project in
+ * the middle of the gesture, and let panels rebuild the node being dragged.
+ */
+const DRAG_SELECTOR = [
+  'input[type=range]',
+  '.clip',
+  '.trim-handle',
+  '.auto-handle',
+  '.auto-overlay',
+  '.ruler-track',
+  '.lane-body',
+].join(',');
+
 export function installInteractionGuard(): void {
   document.addEventListener(
     'pointerdown',
     (e) => {
       const t = e.target as HTMLElement | null;
-      if (t && t.tagName === 'INPUT' && (t as HTMLInputElement).type === 'range') gestures++;
+      if (t?.closest?.(DRAG_SELECTOR)) gestures++;
     },
     true,
   );
