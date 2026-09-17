@@ -25,12 +25,22 @@ function scratch(width: number): Float32Array {
   return a;
 }
 
-function hexToRgb(hex: string): [number, number, number] {
-  const m = hex.trim().replace('#', '');
-  if (m.length === 3) {
-    return [parseInt(m[0] + m[0], 16), parseInt(m[1] + m[1], 16), parseInt(m[2] + m[2], 16)];
+/**
+ * Every colour token is hex today, but a token that ever becomes rgb() or
+ * oklch() would otherwise turn every waveform into NaN — silently, since
+ * canvas just refuses the fill. Fall back to letting the browser parse it.
+ */
+function parseColour(value: string, fallback: [number, number, number]): [number, number, number] {
+  const hex = value.trim().replace('#', '');
+  if (/^[0-9a-f]{3}$/i.test(hex)) {
+    return [parseInt(hex[0] + hex[0], 16), parseInt(hex[1] + hex[1], 16), parseInt(hex[2] + hex[2], 16)];
   }
-  return [parseInt(m.slice(0, 2), 16), parseInt(m.slice(2, 4), 16), parseInt(m.slice(4, 6), 16)];
+  if (/^[0-9a-f]{6}$/i.test(hex)) {
+    return [parseInt(hex.slice(0, 2), 16), parseInt(hex.slice(2, 4), 16), parseInt(hex.slice(4, 6), 16)];
+  }
+  const m = value.match(/(\d+(?:\.\d+)?)[,\s]+(\d+(?:\.\d+)?)[,\s]+(\d+(?:\.\d+)?)/);
+  if (m) return [Number(m[1]), Number(m[2]), Number(m[3])];
+  return fallback;
 }
 
 export function drawWaveform(
@@ -59,7 +69,7 @@ export function drawWaveform(
   const env = scratch(cols);
   readEnvelope(pyramid, level, sourceStart, sourceDuration, cols, env);
 
-  const [r, g, b] = hexToRgb(token(style.hueToken) || '#7b8b9c');
+  const [r, g, b] = parseColour(token(style.hueToken), [123, 139, 156]);
   const mid = hgt / 2;
   const amp = mid * 0.92;
   const sx = w / cols;
@@ -100,7 +110,7 @@ export function drawMasterWaveform(
   if (!ctx) return;
   ctx.clearRect(0, 0, w, hgt);
 
-  const [r, g, b] = hexToRgb(token('--text-faint') || '#7f90a1');
+  const [r, g, b] = parseColour(token('--text-faint'), [127, 144, 161]);
   const mid = hgt / 2;
   const amp = mid * 0.92;
   const sx = w / cols;

@@ -86,13 +86,25 @@ export function trackEditCommand(
   trackId: string,
   mutate: (p: Project) => void,
 ): Command {
-  let before: string | null = null;
-  let after: string | null = null;
-  const snap = (p: Project) => JSON.stringify(p.tracks.find((t) => t.id === trackId));
-  const restore = (p: Project, json: string | null) => {
-    if (json === null) return;
+  let before: Snapshot | null = null;
+  let after: Snapshot | null = null;
+
+  // The project duration travels with the track: trims, splits and loops all
+  // grow it through fitDuration, and restoring only the track left the ruler
+  // stretched to a length nothing occupied any more.
+  interface Snapshot {
+    track: string;
+    duration: number;
+  }
+  const snap = (p: Project): Snapshot => ({
+    track: JSON.stringify(p.tracks.find((t) => t.id === trackId)),
+    duration: p.duration,
+  });
+  const restore = (p: Project, s: Snapshot | null) => {
+    if (!s) return;
     const idx = p.tracks.findIndex((t) => t.id === trackId);
-    if (idx >= 0) p.tracks[idx] = JSON.parse(json);
+    if (idx >= 0) p.tracks[idx] = JSON.parse(s.track);
+    p.duration = s.duration;
   };
   return {
     label,

@@ -34,6 +34,7 @@ export class TopBar {
   private tcTotal!: HTMLElement;
   private undoBtn!: HTMLButtonElement;
   private redoBtn!: HTMLButtonElement;
+  private savedEl!: HTMLElement;
 
   constructor() {
     this.el = h('div', { class: 'topbar' });
@@ -48,6 +49,19 @@ export class TopBar {
     // command: the Undo button showed the wrong label and stayed disabled for
     // one edit after the first. The stack has its own notifier — use it.
     history.subscribe(() => this.updateHistory());
+    // "SAVED 3S AGO" went stale the moment it was painted, and only refreshed
+    // when some unrelated edit forced a rebuild. Once a minute is enough:
+    // the text only changes at minute boundaries after the first one.
+    setInterval(() => this.updateSaved(store.get()), 30_000);
+  }
+
+  private updateSaved(s: AppState): void {
+    if (!this.savedEl) return;
+    this.savedEl.textContent = s.ui.dirty
+      ? 'UNSAVED'
+      : s.ui.savedAt
+        ? `SAVED ${ago(s.ui.savedAt)}`
+        : 'NOT SAVED';
   }
 
   /** Full rebuild — only for structural (ui/project) changes, never per-frame. */
@@ -58,11 +72,9 @@ export class TopBar {
 
     const name = h('button', { class: 'proj-name', onclick: () => this.rename() }, s.project.name);
 
-    const saved = h(
-      'span',
-      { class: 'saved mono' },
-      s.ui.dirty ? 'UNSAVED' : s.ui.savedAt ? `SAVED ${ago(s.ui.savedAt)}` : 'NOT SAVED',
-    );
+    this.savedEl = h('span', { class: 'saved mono' });
+    const saved = this.savedEl;
+    this.updateSaved(s);
 
     this.playIcon = svgIcon('c-play', 15);
     this.playBtn = h(

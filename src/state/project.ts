@@ -167,7 +167,9 @@ export interface Reflection {
 export interface ProjectView {
   zoom: number; // pixels per second
   scrollX: number; // seconds
-  theme: 'dark' | 'light';
+  // No theme here. Dark/light is a preference of the machine you are sitting
+  // at (localStorage, see ui/theme.ts), not a property of the piece — a field
+  // here was written into every project file and never read by anything.
 }
 
 export interface Project {
@@ -285,7 +287,7 @@ export function newProject(name = 'Untitled soundscape'): Project {
     tracks: Array.from({ length: 4 }, (_, i) => makeTrack(i)),
     assets: {},
     reflection: emptyReflection(),
-    view: { zoom: 6, scrollX: 0, theme: 'dark' },
+    view: { zoom: 6, scrollX: 0 },
   };
 }
 
@@ -329,7 +331,8 @@ export function migrate(raw: unknown): MigrationResult {
   }
   project.reflection ??= emptyReflection();
   project.masterGain ??= 0;
-  project.view ??= { zoom: 6, scrollX: 0, theme: 'dark' };
+  project.view ??= { zoom: 6, scrollX: 0 };
+  project.view.scrollX ??= 0;
 
   return { project, migratedFrom: version === SCHEMA_VERSION ? undefined : version, warnings };
 }

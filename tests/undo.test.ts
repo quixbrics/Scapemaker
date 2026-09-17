@@ -7,7 +7,7 @@ import { describe, expect, it, beforeEach } from 'vitest';
 import { store } from '../src/state/store';
 import { history, coalescedEdit, endCoalescedEdit } from '../src/state/history';
 import { newProject, migrate, type Project } from '../src/state/project';
-import { setTrackGain, addTrack, removeTrack, setMasterGain, toggleMute } from '../src/state/edits';
+import { setTrackGain, addTrack, removeTrack, setMasterGain, toggleMute, setClipLoop } from '../src/state/edits';
 import { setEqBand, setReverbParam, toggleEq } from '../src/state/effectEdits';
 
 const project = () => store.get().project;
@@ -196,5 +196,32 @@ describe('master gain', () => {
     const old = JSON.parse(JSON.stringify(newProject())) as Record<string, unknown>;
     delete old.masterGain;
     expect(migrate(old).project.masterGain).toBe(0);
+  });
+});
+
+describe('project duration', () => {
+  function addClip(trackId: string, start: number, duration: number) {
+    store.mutateProject((p) => {
+      p.tracks.find((t) => t.id === trackId)!.clips.push({
+        id: `c_${start}`, assetId: 'a1', start, sourceOffset: 0, duration, gain: 0,
+        fadeIn: { duration: 0, curve: 'equalPower' }, fadeOut: { duration: 0, curve: 'equalPower' },
+      });
+    });
+  }
+
+  it('is restored when a clip edit that grew it is undone', () => {
+    const id = trackOf().id;
+    addClip(id, 0, 10);
+    const durationBefore = project().duration;
+    expect(durationBefore).toBe(180);
+
+    // Loop the clip far past the current end so fitDuration has to grow.
+    setClipLoop(id, 'c_0', 40, 0);
+    expect(project().duration).toBeGreaterThan(durationBefore);
+
+    history.undo();
+    // trackEditCommand used to restore only the track, leaving the ruler
+    // stretched to a length nothing occupied.
+    expect(project().duration).toBe(durationBefore);
   });
 });
