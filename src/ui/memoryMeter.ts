@@ -12,6 +12,7 @@
  */
 
 import { assetStore, formatBytes } from '../audio/assetStore';
+import { ensurePersistentStorage, readStorageEstimate, storageSummary } from '../audio/storage';
 import { h } from './dom';
 
 export class MemoryMeter {
@@ -24,7 +25,13 @@ export class MemoryMeter {
     this.label = h('span', { class: 'mono-cap' });
     this.el = h('div', { class: 'mem' }, h('span', { class: 'mem-track' }, this.bar), this.label);
     this.update();
-    assetStore.subscribe(() => this.update());
+    assetStore.subscribe(() => {
+      this.update();
+      // The tooltip carries the on-disk figure too; refresh it when the set of
+      // cached files has plausibly changed, not on a timer.
+      void readStorageEstimate().then(() => this.update());
+    });
+    void ensurePersistentStorage().then(() => this.update());
   }
 
   private update(): void {
@@ -43,6 +50,7 @@ export class MemoryMeter {
       (idle > 0
         ? ` ${formatBytes(idle)} belongs to sounds no longer on the timeline and is reclaimed when the memory is wanted.`
         : '') +
-      (fraction >= 0.8 ? ' Close to the ceiling — delete clips you are not using.' : '');
+      (fraction >= 0.8 ? ' Close to the ceiling — delete clips you are not using.' : '') +
+      (storageSummary() ? ` ${storageSummary()}` : '');
   }
 }

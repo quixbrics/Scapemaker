@@ -8,6 +8,7 @@
  */
 
 import { assetStore } from '../audio/assetStore';
+import { warnIfCacheIsEvictable } from '../audio/storage';
 import { makeLicence } from '../licence/model';
 import type { AssetRef } from '../state/project';
 import { uid } from '../state/project';
@@ -86,6 +87,9 @@ export async function importFile(
 
   try {
     const entry = await assetStore.acquire(ref, { kind: 'blob', blob: file });
+    // Your own recording has no source URL to re-download from, so the cache
+    // is the only copy. Say so once if the browser would not promise to keep it.
+    void warnIfCacheIsEvictable();
     return { ok: true, ref: entry.ref };
   } catch (err) {
     return {

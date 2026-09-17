@@ -9,6 +9,7 @@ import { store } from './state/store';
 import { readAutosave, applyLoadedProject, clearAutosave } from './state/persist';
 import { assetStore } from './audio/assetStore';
 import { newProject } from './state/project';
+import { ensurePersistentStorage } from './audio/storage';
 
 const MIN_WIDTH = 1024;
 
@@ -22,6 +23,9 @@ function checkViewport(): boolean {
 async function boot(): Promise<void> {
   initTheme();
   installResumeOnGesture();
+  // Ask before anything can be written: a student's own recordings live only
+  // in the IndexedDB cache, and best-effort storage can be evicted wholesale.
+  void ensurePersistentStorage();
 
   const app = document.getElementById('app')!;
   if (!checkViewport()) {
