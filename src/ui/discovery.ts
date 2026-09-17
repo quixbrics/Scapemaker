@@ -23,6 +23,7 @@ import {
   hasKey,
   setKey,
   forgetKey,
+  keyIsRemembered,
   validateKey,
   resolveFreesoundUrl,
   FreesoundRateLimitError,
@@ -261,8 +262,21 @@ export class Discovery {
         h('div', { class: 'field', style: 'margin-top:8px' }, svgIcon('c-file', 14), pasteInput),
         h(
           'button',
-          { class: 'linkish', style: 'margin-top:8px;font-size:11px', onclick: () => { forgetKey(); this.renderFreesoundInner(pane); } },
-          'Forget key on this machine',
+          {
+            class: 'linkish',
+            style: 'margin-top:8px;font-size:11px',
+            ...tt(
+              'Disconnect Freesound',
+              keyIsRemembered()
+                ? 'Removes the key from this computer.'
+                : 'Removes the key. It would be forgotten when you close the browser anyway.',
+            ),
+            onclick: () => {
+              forgetKey();
+              this.renderFreesoundInner(pane);
+            },
+          },
+          keyIsRemembered() ? 'Forget key on this computer' : 'Disconnect Freesound',
         ),
       ),
       this.freesound.resultsHost,
@@ -270,7 +284,8 @@ export class Discovery {
   }
 
   private freesoundKeyPanel(pane: HTMLElement): HTMLElement {
-    const key = h('input', { type: 'text', placeholder: 'paste your API key here' }) as HTMLInputElement;
+    const key = h('input', { type: 'password', placeholder: 'paste your API key here' }) as HTMLInputElement;
+    const remember = h('input', { type: 'checkbox', id: 'fs-remember' }) as HTMLInputElement;
     const status = h('div', { class: 'muted', style: 'margin-top:6px' }, '');
     const connect = async () => {
       const v = key.value.trim();
@@ -279,7 +294,7 @@ export class Discovery {
       try {
         const ok = await validateKey(v);
         if (ok) {
-          setKey(v);
+          setKey(v, remember.checked);
           store.toast('info', 'Freesound connected.');
           this.renderFreesoundInner(pane);
         } else {
@@ -304,9 +319,22 @@ export class Discovery {
         h('li', {}, 'Paste it below'),
       ),
       h('div', { class: 'field' }, key),
+      h(
+        'label',
+        { class: 'remember-row', for: 'fs-remember' },
+        remember,
+        h('span', {}, 'Keep this key on this computer'),
+      ),
       h('button', { class: 'btn primary', style: 'margin-top:8px', onclick: connect }, 'Connect'),
       status,
-      h('p', { class: 'muted', style: 'margin-top:12px' }, 'Your key is stored only in this browser and is sent only to Freesound. We never see it. On a shared or lab machine it stays until you remove it.'),
+      h(
+        'p',
+        { class: 'muted', style: 'margin-top:12px' },
+        'Your key is sent only to Freesound; we never see it. By default it is ' +
+          'forgotten when you close the browser — on a shared or lab machine, ' +
+          'that stops the next person inheriting your key and your rate limit. ' +
+          'Tick the box above only on a computer that is yours.',
+      ),
       h('hr', { style: 'border:none;border-top:1px solid var(--line);margin:14px 0' }),
       h('p', {}, h('strong', {}, 'Don’t want an account? '), 'You don’t need one. Find a sound on freesound.org, download it, and drag it into ScapeMaker — then paste the sound’s page URL in the Freesound tab so the credit is recorded properly. Everything else works without a key.'),
     );

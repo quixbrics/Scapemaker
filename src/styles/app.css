@@ -432,3 +432,8 @@
 /* Master trim, under the meter readouts. */
 .master-fader { gap: 9px; }
 .master-fader .h-slider { flex: 1; }
+
+.remember-row {
+  display: flex; align-items: center; gap: 7px; margin-top: 9px;
+  font-size: 11.5px; color: var(--text-2); cursor: pointer;
+}

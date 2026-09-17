@@ -28,17 +28,29 @@ export class FreesoundRateLimitError extends Error {
   }
 }
 
-// --- key storage (localStorage, try/catch — lab machines may block it) -------
+// --- key storage -----------------------------------------------------------
+//
+// The key defaults to sessionStorage: this is aimed at students, who often
+// work in shared edit suites, and a key left in localStorage is inherited by
+// whoever sits down next — along with the previous student's rate limit.
+// Keeping it across sessions is offered, but has to be asked for.
+//
+// Both accessors are wrapped: a locked-down lab machine may block storage
+// entirely, in which case the key lives in memory for this tab and no more.
 
 let memKey: string | null = null;
 
+function read(store: Storage | undefined): string | null {
+  try {
+    return store?.getItem(KEY_STORAGE) ?? null;
+  } catch {
+    return null;
+  }
+}
+
 export function getKey(): string | null {
   if (memKey) return memKey;
-  try {
-    memKey = localStorage.getItem(KEY_STORAGE);
-  } catch {
-    memKey = null;
-  }
+  memKey = read(sessionStorage) ?? read(localStorage);
   return memKey;
 }
 
@@ -46,21 +58,38 @@ export function hasKey(): boolean {
   return !!getKey();
 }
 
-export function setKey(key: string): void {
+/** Is the key being kept beyond this browser session? */
+export function keyIsRemembered(): boolean {
+  return read(localStorage) !== null;
+}
+
+/**
+ * `remember` opts into localStorage — "keep me signed in", explicitly chosen,
+ * rather than the default.
+ */
+export function setKey(key: string, remember = false): void {
   memKey = key.trim();
   try {
-    localStorage.setItem(KEY_STORAGE, memKey);
+    sessionStorage.setItem(KEY_STORAGE, memKey);
   } catch {
-    /* session-only fallback */
+    /* in-memory only */
+  }
+  try {
+    if (remember) localStorage.setItem(KEY_STORAGE, memKey);
+    else localStorage.removeItem(KEY_STORAGE);
+  } catch {
+    /* ignore */
   }
 }
 
 export function forgetKey(): void {
   memKey = null;
-  try {
-    localStorage.removeItem(KEY_STORAGE);
-  } catch {
-    /* ignore */
+  for (const store of [sessionStorage, localStorage]) {
+    try {
+      store.removeItem(KEY_STORAGE);
+    } catch {
+      /* ignore */
+    }
   }
 }
 
