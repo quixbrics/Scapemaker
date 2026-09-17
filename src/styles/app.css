@@ -401,3 +401,15 @@
 .reflection-input:focus {
   outline: none; border-color: var(--accent-border); background: var(--panel);
 }
+
+/* ---------- audio memory meter (Build Plan §6.1) ---------- */
+.mem { display: flex; align-items: center; gap: 7px; color: var(--text-dim); }
+.mem-track {
+  width: 54px; height: 4px; border-radius: 2px;
+  background: var(--border); overflow: hidden;
+}
+.mem-fill { display: block; height: 100%; width: 0%; background: var(--text-faint); transition: width .25s; }
+.mem.warn .mem-fill { background: var(--warn); }
+.mem.warn .mono-cap { color: var(--warn); }
+.mem.danger .mem-fill { background: var(--danger); }
+.mem.danger .mono-cap { color: var(--danger); }

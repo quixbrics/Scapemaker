@@ -1,7 +1,7 @@
 /* App shell — assembles the panels and wires global keyboard shortcuts. */
 
 import '../styles/app.css';
-import { store } from '../state/store';
+import { store, type AppState } from '../state/store';
 import { history } from '../state/history';
 import { transport } from '../audio/transport';
 import { h } from './dom';
@@ -18,6 +18,7 @@ import { openExportDialog } from './dialogs/exportDialog';
 import { openProjectFile } from './dialogs/openProject';
 import { saveProjectToFile, scheduleAutosave } from '../state/persist';
 import { flushReflectionEdits } from './reflection';
+import { assetStore } from '../audio/assetStore';
 
 export function mountApp(root: HTMLElement): void {
   installIconSheet();
@@ -43,6 +44,20 @@ export function mountApp(root: HTMLElement): void {
   store.subscribe((_s, changed) => {
     if (changed.has('project')) scheduleAutosave();
   });
+
+  // Tell the asset store which decoded audio the project still points at, so
+  // sounds deleted from the timeline stop counting against the memory budget.
+  // Derived from the project rather than hooked into deleteClip, because undo
+  // and redo add and remove clips without going through the edit functions.
+  const retainUsedAssets = (s: AppState) => {
+    const live = new Set<string>();
+    for (const track of s.project.tracks) for (const clip of track.clips) live.add(clip.assetId);
+    assetStore.retain(live);
+  };
+  store.subscribe((s, changed) => {
+    if (changed.has('project')) retainUsedAssets(s);
+  });
+  retainUsedAssets(store.get());
 
   // never two things playing at once: starting the mix silences any Discovery preview
   store.subscribe((s, changed) => {

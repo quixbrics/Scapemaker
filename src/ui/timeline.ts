@@ -41,6 +41,7 @@ import { loopSpan, type AutomationParam, type Clip, type Track } from '../state/
 import { dragLoopClip, loopCountForSpan } from '../state/edits';
 import { importResultToTimeline, cancelImport } from '../sources/importResult';
 import { ASSET_DND_TYPE, SEARCH_RESULT_DND_TYPE } from './dnd';
+import { MemoryMeter } from './memoryMeter';
 import type { SoundResult } from '../sources/types';
 
 const HEAD_W = 178;
@@ -207,6 +208,7 @@ export class Timeline {
       h('span', { class: 'mini-label' }, 'Snap'),
       h('div', { class: 'spacer' }),
       this.countEl,
+      new MemoryMeter().el,
       h('div', { class: 'zoom' }, h('span', { class: 'mono-cap' }, 'ZOOM'), this.zoomInput),
       h(
         'button',

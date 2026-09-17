@@ -1,8 +1,11 @@
 /*
  * Asset store — the binding constraint (Build Plan §1.1, §6.1).
  *
- *  - ONE decoded AudioBuffer per source asset, reference-counted.
+ *  - ONE decoded AudioBuffer per source asset.
  *  - Clips are non-owning views; duplicating a clip allocates nothing.
+ *  - Liveness is DERIVED from the project (`retain`), not reference-counted:
+ *    undo and redo move clips in and out of existence without passing through
+ *    any acquire/release pair, so a hand-kept count would drift.
  *  - Original compressed files are cached in IndexedDB keyed by AssetId.
  *  - Decoded buffers are NEVER persisted (10x larger, cheap to rebuild).
  *  - A hard per-project byte budget, surfaced to the UI as a meter.
@@ -19,6 +22,31 @@ import type { AssetId, AssetRef } from '../state/project';
 
 /** Provisional until S3 is measured in-browser. ~600 MB of decoded audio. */
 export const ASSET_BUDGET_BYTES = 600 * 1024 * 1024;
+/** Sweep idle assets once memory passes this, leaving headroom for the next import. */
+const EVICT_ABOVE_BYTES = ASSET_BUDGET_BYTES * 0.8;
+
+/** Raised when decoded audio will not fit, even after evicting idle assets. */
+export class AssetBudgetError extends Error {
+  constructor(
+    readonly title: string,
+    readonly needBytes: number,
+    readonly usedBytes: number,
+  ) {
+    super(
+      `"${title}" needs ${formatBytes(needBytes)} of audio memory and there is not enough room ` +
+        `(${formatBytes(usedBytes)} of ${formatBytes(ASSET_BUDGET_BYTES)} in use). ` +
+        `Delete some clips you are not using, or start a new project.`,
+    );
+    this.name = 'AssetBudgetError';
+  }
+}
+
+export function formatBytes(n: number): string {
+  if (n <= 0) return '0 MB';
+  if (n >= 1024 * 1024 * 1024) return `${(n / 1024 ** 3).toFixed(1)} GB`;
+  if (n >= 1024 * 1024) return `${Math.round(n / 1024 ** 2)} MB`;
+  return `${Math.max(1, Math.round(n / 1024))} KB`;
+}
 
 const DB_NAME = 'scapemaker';
 const DB_VERSION = 1;
@@ -114,7 +142,15 @@ async function fetchWithProgress(
 
 export class AssetStore {
   private entries = new Map<AssetId, AssetEntry>();
-  private refs = new Map<AssetId, number>();
+  /**
+   * Assets the project still refers to. Derived from the project on every
+   * change (see `retain`) rather than reference-counted by hand: the project
+   * IS the truth about what is live, and undo/redo move clips in and out of
+   * existence without going through any acquire/release pair.
+   */
+  private live = new Set<AssetId>();
+  /** When each no-longer-referenced asset fell out of use, for eviction order. */
+  private idleSince = new Map<AssetId, number>();
   private inflight = new Map<AssetId, Promise<AssetEntry>>();
   private listeners = new Set<() => void>();
 
@@ -137,6 +173,57 @@ export class AssetStore {
   get overBudget(): boolean {
     return this.usedBytes > ASSET_BUDGET_BYTES;
   }
+  /** 0..1 of the budget in use — what the meter draws. */
+  get usedFraction(): number {
+    return this.usedBytes / ASSET_BUDGET_BYTES;
+  }
+
+  /**
+   * Tell the store which assets the project still uses. Anything decoded but
+   * absent from `ids` becomes evictable; anything that comes back (undo, or a
+   * re-added clip) stops being evictable again without a re-decode.
+   *
+   * Nothing is thrown away here. An idle asset is kept until the memory is
+   * actually wanted, so undoing a delete is instant rather than a re-decode.
+   */
+  retain(ids: Iterable<AssetId>): void {
+    this.live = new Set(ids);
+    const now = Date.now();
+    for (const id of this.entries.keys()) {
+      if (this.live.has(id)) this.idleSince.delete(id);
+      else if (!this.idleSince.has(id)) this.idleSince.set(id, now);
+    }
+    if (this.usedBytes > EVICT_ABOVE_BYTES) this.sweep();
+  }
+
+  /**
+   * Drop idle assets, oldest first, until back under the high-water mark.
+   * Returns the bytes reclaimed. Live assets are never touched — running out
+   * of room is reported to the student, not silently papered over by unloading
+   * audio their timeline still points at.
+   */
+  private sweep(target = EVICT_ABOVE_BYTES): number {
+    const idle = [...this.idleSince.entries()]
+      .filter(([id]) => this.entries.has(id))
+      .sort((a, b) => a[1] - b[1]);
+
+    let freed = 0;
+    for (const [id] of idle) {
+      if (this.usedBytes <= target) break;
+      freed += this.entries.get(id)?.bytes ?? 0;
+      this.entries.delete(id);
+      this.idleSince.delete(id);
+    }
+    if (freed > 0) this.notify();
+    return freed;
+  }
+
+  /** Decoded assets the project no longer refers to, and what they cost. */
+  idleBytes(): number {
+    let n = 0;
+    for (const id of this.idleSince.keys()) n += this.entries.get(id)?.bytes ?? 0;
+    return n;
+  }
 
   has(id: AssetId): boolean {
     return this.entries.has(id);
@@ -152,12 +239,15 @@ export class AssetStore {
   }
 
   /**
-   * Ensure an asset is decoded and cached. Increments the ref count.
-   * Deduplicates concurrent calls for the same id. `source` is only used on a
-   * cache miss — pass the freshest way to obtain the bytes. `onProgress`
-   * reports fetch progress (0..1, or -1 once decoding starts — decode has no
-   * native progress event) so the UI can show something better than a spinner
-   * on a slow file.
+   * Ensure an asset is decoded and in memory. Deduplicates concurrent calls
+   * for the same id. `source` is only used on a cache miss — pass the freshest
+   * way to obtain the bytes. `onProgress` reports fetch progress (0..1, or -1
+   * once decoding starts — decodeAudioData has no progress event) so the UI
+   * can show something better than a spinner on a slow file.
+   *
+   * Throws AssetBudgetError if the decoded audio would not fit even after
+   * idle assets are evicted. That is a refusal the student is told about, not
+   * a tab that dies partway through a decode.
    */
   async acquire(
     ref: AssetRef,
@@ -167,21 +257,23 @@ export class AssetStore {
   ): Promise<AssetEntry> {
     const existing = this.entries.get(ref.id);
     if (existing) {
-      this.refs.set(ref.id, (this.refs.get(ref.id) ?? 0) + 1);
+      this.idleSince.delete(ref.id);
       return existing;
     }
     const pending = this.inflight.get(ref.id);
-    if (pending) {
-      this.refs.set(ref.id, (this.refs.get(ref.id) ?? 0) + 1);
-      return pending;
-    }
+    if (pending) return pending;
 
     const task = this.load(ref, source, onProgress, signal);
     this.inflight.set(ref.id, task);
     try {
       const entry = await task;
+      // Make room before admitting it, then refuse rather than blow the budget.
+      if (this.usedBytes + entry.bytes > ASSET_BUDGET_BYTES) this.sweep(ASSET_BUDGET_BYTES - entry.bytes);
+      if (this.usedBytes + entry.bytes > ASSET_BUDGET_BYTES) {
+        throw new AssetBudgetError(ref.title, entry.bytes, this.usedBytes);
+      }
       this.entries.set(ref.id, entry);
-      this.refs.set(ref.id, (this.refs.get(ref.id) ?? 0) + 1);
+      this.idleSince.delete(ref.id);
       this.notify();
       return entry;
     } finally {
@@ -245,22 +337,11 @@ export class AssetStore {
     return { ref, buffer, peaks, bytes };
   }
 
-  /** Decrement ref count; evict the decoded buffer at zero. IndexedDB stays. */
-  release(id: AssetId): void {
-    const n = (this.refs.get(id) ?? 0) - 1;
-    if (n <= 0) {
-      this.refs.delete(id);
-      this.entries.delete(id);
-      this.notify();
-    } else {
-      this.refs.set(id, n);
-    }
-  }
-
   /** Remove from memory AND the IndexedDB cache. */
   async forget(id: AssetId): Promise<void> {
-    this.refs.delete(id);
     this.entries.delete(id);
+    this.idleSince.delete(id);
+    this.live.delete(id);
     await idbDelete(id);
     this.notify();
   }
@@ -270,8 +351,9 @@ export class AssetStore {
     return (await idbGet(id)) !== undefined;
   }
 
-  refCount(id: AssetId): number {
-    return this.refs.get(id) ?? 0;
+  /** Is this asset decoded but no longer referenced by the project? */
+  isIdle(id: AssetId): boolean {
+    return this.idleSince.has(id);
   }
 }
 
