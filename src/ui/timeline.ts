@@ -32,6 +32,8 @@ import {
   addAutomationPoint,
   moveAutomationPoint,
   removeAutomationPoint,
+  snapshotAutomation,
+  commitAutomationGesture,
 } from '../state/effectEdits';
 import { evaluateAt } from '../audio/automation';
 import { AUTOMATION_PARAMS, AUTOMATION_PARAM_LIST, toUnit, fromUnit } from './automationParams';
@@ -495,14 +497,19 @@ export class Timeline {
       handle.addEventListener('pointerdown', (e) => {
         e.stopPropagation();
         const rect = overlay.getBoundingClientRect();
+        // The lane re-sorts its points by time on every write, so `i` is only
+        // valid for the first move — track the index the point moves to.
+        let idx = i;
+        const before = snapshotAutomation(track.id);
         const move = (ev: PointerEvent) => {
           const time = Math.max(0, ((ev.clientX - rect.left) / rect.width) * dur);
           const unit = 1 - (ev.clientY - rect.top) / rect.height;
-          moveAutomationPoint(track.id, param, i, time, fromUnit(param, unit));
+          idx = moveAutomationPoint(track.id, param, idx, time, fromUnit(param, unit));
         };
         const up = () => {
           window.removeEventListener('pointermove', move);
           window.removeEventListener('pointerup', up);
+          commitAutomationGesture(track.id, 'Move automation point', before);
         };
         window.addEventListener('pointermove', move);
         window.addEventListener('pointerup', up);

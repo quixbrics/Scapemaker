@@ -134,19 +134,63 @@ export function addAutomationPoint(trackId: string, param: AutomationParam, poin
   });
 }
 
+/**
+ * Move one point and return the index it now occupies.
+ *
+ * The lane is re-sorted by time on every write, so the caller's index goes
+ * stale the moment the dragged point crosses a neighbour — a drag that held
+ * onto its original index silently started dragging the neighbour instead.
+ * Callers must feed the returned index back in on the next move.
+ *
+ * Not undoable on its own: a drag emits hundreds of these. Wrap a gesture in
+ * `snapshotAutomation` / `commitAutomationGesture` for one undo step.
+ */
 export function moveAutomationPoint(
   trackId: string,
   param: AutomationParam,
   index: number,
   time: number,
   value: number,
-): void {
+): number {
+  let nextIndex = index;
   store.mutateProject((p) => {
     const t = track(p, trackId);
     const lane = t && getLane(t, param);
     if (!lane || !lane.points[index]) return;
-    lane.points[index] = { ...lane.points[index], time: Math.max(0, time), value };
+    const moved = { ...lane.points[index], time: Math.max(0, time), value };
+    lane.points[index] = moved;
     lane.points = sortPoints(lane.points);
+    nextIndex = lane.points.indexOf(moved);
+  });
+  return nextIndex;
+}
+
+/** Deep copy of a track's automation, to open an undoable gesture against. */
+export function snapshotAutomation(trackId: string): AutomationLane[] {
+  return structuredClone(track(store.get().project, trackId)?.automation ?? []);
+}
+
+/**
+ * Close a gesture opened with `snapshotAutomation` — one history entry for the
+ * whole drag, or none at all if nothing actually moved.
+ */
+export function commitAutomationGesture(
+  trackId: string,
+  label: string,
+  before: AutomationLane[],
+): void {
+  const after = snapshotAutomation(trackId);
+  if (JSON.stringify(before) === JSON.stringify(after)) return;
+  history.push({
+    label,
+    do(p) {
+      const t = track(p, trackId);
+      if (t) t.automation = structuredClone(after);
+    },
+    undo(p) {
+      const t = track(p, trackId);
+      if (t) t.automation = structuredClone(before);
+    },
   });
 }
 
