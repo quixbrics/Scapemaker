@@ -1,6 +1,6 @@
 /* EQ / reverb / automation edits on a track. Coalesced live; one undo step per gesture. */
 
-import { history } from './history';
+import { history, coalescedEdit, endCoalescedEdit } from './history';
 import { store } from './store';
 import {
   defaultEq,
@@ -34,39 +34,91 @@ export function ensureReverb(trackId: string): void {
 
 export function toggleEq(trackId: string): void {
   ensureEq(trackId);
-  store.mutateProject((p) => {
-    const t = track(p, trackId);
-    if (t?.eq) t.eq.enabled = !t.eq.enabled;
+  const next = !track(store.get().project, trackId)?.eq?.enabled;
+  endCoalescedEdit(); // a discrete toggle must not join the previous sweep
+  history.push({
+    label: next ? 'Enable EQ' : 'Disable EQ',
+    do: (p) => {
+      const t = track(p, trackId);
+      if (t?.eq) t.eq.enabled = next;
+    },
+    undo: (p) => {
+      const t = track(p, trackId);
+      if (t?.eq) t.eq.enabled = !next;
+    },
   });
 }
 export function toggleReverb(trackId: string): void {
   ensureReverb(trackId);
-  store.mutateProject((p) => {
-    const t = track(p, trackId);
-    if (t?.reverb) t.reverb.enabled = !t.reverb.enabled;
+  const next = !track(store.get().project, trackId)?.reverb?.enabled;
+  endCoalescedEdit();
+  history.push({
+    label: next ? 'Enable reverb' : 'Disable reverb',
+    do: (p) => {
+      const t = track(p, trackId);
+      if (t?.reverb) t.reverb.enabled = next;
+    },
+    undo: (p) => {
+      const t = track(p, trackId);
+      if (t?.reverb) t.reverb.enabled = !next;
+    },
   });
 }
 
-export function setEqBand(trackId: string, band: number, patch: { gain?: number; frequency?: number; q?: number }): void {
+/**
+ * One field of one EQ band. Coalesced per field, so a sweep is a single undo
+ * step that redoes to where the sweep ended — these were direct mutations with
+ * no history entry at all, so an EQ move simply could not be undone.
+ */
+export function setEqBand(
+  trackId: string,
+  band: number,
+  patch: { gain?: number; frequency?: number; q?: number },
+): void {
   ensureEq(trackId);
-  store.mutateProject((p) => {
-    const t = track(p, trackId);
-    if (!t?.eq) return;
-    const b = t.eq.bands[band];
-    if (patch.gain !== undefined) b.gain = patch.gain;
-    if (patch.frequency !== undefined) b.frequency = patch.frequency;
-    if (patch.q !== undefined) b.q = patch.q;
-  });
+  for (const field of ['gain', 'frequency', 'q'] as const) {
+    const value = patch[field];
+    if (value === undefined) continue;
+    coalescedEdit(
+      `${trackId}:eq:${band}:${field}`,
+      `EQ ${field}`,
+      (p) => track(p, trackId)?.eq?.bands[band][field] ?? 0,
+      (p, v) => {
+        const b = track(p, trackId)?.eq?.bands[band];
+        if (b) b[field] = v;
+      },
+      value,
+    );
+  }
 }
 
-export function setReverbParam(trackId: string, patch: Partial<Pick<Track['reverb'] & object, 'size' | 'decay' | 'wet' | 'dry'>>): void {
+/** As setEqBand: coalesced per field, and undoable, which it previously was not. */
+export function setReverbParam(
+  trackId: string,
+  patch: Partial<Pick<Track['reverb'] & object, 'size' | 'decay' | 'wet' | 'dry'>>,
+): void {
   ensureReverb(trackId);
-  store.mutateProject((p) => {
-    const t = track(p, trackId);
-    if (!t?.reverb) return;
-    Object.assign(t.reverb, patch);
-    t.reverb.preset = 'custom';
-  });
+  for (const field of ['size', 'decay', 'wet', 'dry'] as const) {
+    const value = patch[field];
+    if (value === undefined) continue;
+    coalescedEdit(
+      `${trackId}:reverb:${field}`,
+      `Reverb ${field}`,
+      (p) => {
+        const rv = track(p, trackId)?.reverb;
+        // Preset is restored with the value: nudging a dial makes the reverb
+        // "custom", and undoing that has to put the preset name back too.
+        return { value: rv?.[field] ?? 0, preset: rv?.preset ?? 'custom' };
+      },
+      (p, v) => {
+        const rv = track(p, trackId)?.reverb;
+        if (!rv) return;
+        rv[field] = v.value;
+        rv.preset = v.preset;
+      },
+      { value, preset: 'custom' as ReverbPreset },
+    );
+  }
 }
 
 export function setReverbPreset(trackId: string, preset: Exclude<ReverbPreset, 'custom'>): void {

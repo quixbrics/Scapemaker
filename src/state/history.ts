@@ -110,3 +110,78 @@ export function trackEditCommand(
     },
   };
 }
+
+// ---------------------------------------------------------------------------
+// Coalesced gestures
+// ---------------------------------------------------------------------------
+
+interface Gesture<T> {
+  /** where the value was before the gesture started */
+  prev: T;
+  /** the latest value the gesture has reached */
+  value: T;
+}
+
+let activeKey: string | null = null;
+let activeGesture: Gesture<unknown> | null = null;
+let gestureTimer: ReturnType<typeof setTimeout> | null = null;
+
+function closeGesture(): void {
+  activeKey = null;
+  activeGesture = null;
+  if (gestureTimer) {
+    clearTimeout(gestureTimer);
+    gestureTimer = null;
+  }
+}
+
+/**
+ * One undo step for a whole gesture — a fader drag, an EQ sweep — rather than
+ * one per input event.
+ *
+ * The first call for a `key` pushes a command; later calls within the window
+ * update that same command's target value in place. This matters for redo: a
+ * command that closed over the value from the *first* event of the drag would
+ * redo to a stale position, which is what the previous hand-rolled version in
+ * edits.ts did.
+ *
+ * `read` and `write` address one field so the command stays cheap — no
+ * snapshotting a whole track per animation frame.
+ */
+export function coalescedEdit<T>(
+  key: string,
+  label: string,
+  read: (p: Project) => T,
+  write: (p: Project, value: T) => void,
+  value: T,
+  windowMs = 500,
+): void {
+  const restart = () => {
+    if (gestureTimer) clearTimeout(gestureTimer);
+    gestureTimer = setTimeout(closeGesture, windowMs);
+  };
+
+  if (activeKey === key && activeGesture) {
+    (activeGesture as Gesture<T>).value = value;
+    store.mutateProject((p) => write(p, value));
+    restart();
+    return;
+  }
+
+  closeGesture();
+  const gesture: Gesture<T> = { prev: read(store.get().project), value };
+  activeKey = key;
+  activeGesture = gesture as Gesture<unknown>;
+  history.push({
+    label,
+    // Reads gesture.value at do-time, so redo lands where the gesture ENDED.
+    do: (p) => write(p, gesture.value),
+    undo: (p) => write(p, gesture.prev),
+  });
+  restart();
+}
+
+/** End any open gesture, so the next edit starts a fresh undo step. */
+export function endCoalescedEdit(): void {
+  closeGesture();
+}

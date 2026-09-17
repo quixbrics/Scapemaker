@@ -43,6 +43,12 @@ export interface BuildOptions {
   withAnalyser?: boolean;
   /** restrict to a single track id (stems export) */
   onlyTrackId?: string;
+  /**
+   * Render the track as if nothing were muted or soloed. Stems only: a stem is
+   * "this track on its own", and honouring the mix's solo state meant exporting
+   * a folder of silent WAVs whenever any track happened to be soloed.
+   */
+  ignoreMuteSolo?: boolean;
 }
 
 export interface LiveGraph {
@@ -95,7 +101,7 @@ export function buildGraph(
   for (const track of project.tracks) {
     if (opts.onlyTrackId && track.id !== opts.onlyTrackId) continue;
 
-    const audible = !track.muted && (!anySolo || track.solo);
+    const audible = opts.ignoreMuteSolo || (!track.muted && (!anySolo || track.solo));
 
     const trackGain = ctx.createGain();
     trackGain.gain.value = dbToGain(track.gain);

@@ -4,7 +4,7 @@
  * effect toggles. All non-destructive — nothing here touches a decoded buffer.
  */
 
-import { history, trackEditCommand, type Command } from './history';
+import { history, trackEditCommand, coalescedEdit, endCoalescedEdit, type Command } from './history';
 import { store } from './store';
 import {
   makeClip,
@@ -33,11 +33,14 @@ export function addTrack(): void {
     return;
   }
   const index = p.tracks.length;
+  // Built once so undo can match the id. Filtering on `index` removed any
+  // track that happened to share it.
+  const track = makeTrack(index);
   history.push({
     label: 'Add track',
-    do: (pr) => pr.tracks.push(makeTrack(index)),
+    do: (pr) => pr.tracks.push(structuredClone(track)),
     undo: (pr) => {
-      pr.tracks = pr.tracks.filter((t) => t.index !== index);
+      pr.tracks = pr.tracks.filter((t) => t.id !== track.id);
     },
   });
 }
@@ -49,18 +52,22 @@ export function placeAsset(ref: AssetRef, trackId: string, start: number): void 
   if (!track) return;
   const entry = assetStore.peek(ref.id);
   const duration = entry?.buffer.duration ?? ref.duration ?? 5;
+  // Fixed up front so undo can match on it. Matching on (assetId, start)
+  // instead removed EVERY copy of the same sound placed at the same spot.
+  const clipId = uid('clp');
+  const at = Math.max(0, start);
 
   const cmd: Command = {
     label: `Add "${ref.title}"`,
     do(pr) {
       pr.assets[ref.id] = { ...ref, duration };
       const t = findTrack(pr, track.id);
-      t?.clips.push(makeClip(ref.id, Math.max(0, start), duration));
+      t?.clips.push({ ...makeClip(ref.id, at, duration), id: clipId });
       pr.duration = fitDuration(pr);
     },
     undo(pr) {
       const t = findTrack(pr, track.id);
-      if (t) t.clips = t.clips.filter((c) => !(c.assetId === ref.id && Math.abs(c.start - Math.max(0, start)) < 1e-6));
+      if (t) t.clips = t.clips.filter((c) => c.id !== clipId);
       // keep the asset ref; harmless and avoids churning the bin
     },
   };
@@ -372,9 +379,6 @@ export function setClipFade(
 
 // --- track params (coalesced; not every drag frame is a discrete undo) -----
 
-let coalesceKey: string | null = null;
-let coalesceTimer: ReturnType<typeof setTimeout> | null = null;
-
 function setTrackField<K extends keyof Track>(
   trackId: string,
   field: K,
@@ -382,38 +386,17 @@ function setTrackField<K extends keyof Track>(
   label: string,
   coalesce = true,
 ): void {
-  const p = store.get().project;
-  const track = findTrack(p, trackId);
-  if (!track) return;
-  const key = `${trackId}:${String(field)}`;
-  const prev = track[field];
-
-  if (coalesce && coalesceKey === key) {
-    store.mutateProject((pr) => {
-      const t = findTrack(pr, trackId);
-      if (t) t[field] = value;
-    });
-    if (coalesceTimer) clearTimeout(coalesceTimer);
-    coalesceTimer = setTimeout(() => (coalesceKey = null), 500);
-    return;
-  }
-
-  history.push({
-    label,
-    do(pr) {
-      const t = findTrack(pr, trackId);
-      if (t) t[field] = value;
-    },
-    undo(pr) {
-      const t = findTrack(pr, trackId);
-      if (t) t[field] = prev;
-    },
-  });
-  if (coalesce) {
-    coalesceKey = key;
-    if (coalesceTimer) clearTimeout(coalesceTimer);
-    coalesceTimer = setTimeout(() => (coalesceKey = null), 500);
-  }
+  if (!findTrack(store.get().project, trackId)) return;
+  const read = (p: Project) => findTrack(p, trackId)?.[field] as Track[K];
+  const write = (p: Project, v: Track[K]) => {
+    const t = findTrack(p, trackId);
+    if (t) t[field] = v;
+  };
+  // A discrete toggle (mute, solo, rename) is its own undo step and must not
+  // absorb the next one.
+  if (!coalesce) endCoalescedEdit();
+  coalescedEdit(`${trackId}:${String(field)}`, label, read, write, value);
+  if (!coalesce) endCoalescedEdit();
 }
 
 export const setTrackGain = (id: string, db: number) => setTrackField(id, 'gain', db, 'Track gain');

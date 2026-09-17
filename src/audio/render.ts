@@ -16,6 +16,8 @@ export interface RenderOptions {
   onProgress?: (fraction: number) => void;
   onlyTrackId?: string;
   sampleRate?: number;
+  /** stems: render the track on its own, ignoring the mix's mute/solo state */
+  ignoreMuteSolo?: boolean;
 }
 
 function OfflineCtor(): typeof OfflineAudioContext {
@@ -43,6 +45,7 @@ export async function renderProject(
     destination: ctx.destination,
     withAnalyser: false,
     onlyTrackId: opts.onlyTrackId,
+    ignoreMuteSolo: opts.ignoreMuteSolo,
   });
 
   // OfflineAudioContext has no progress event; approximate with a timer that we
@@ -82,6 +85,8 @@ export async function renderStems(
     const buffer = await renderProject(project, {
       ...opts,
       onlyTrackId: track.id,
+      // A stem is the track by itself. Mute and solo belong to the mixdown.
+      ignoreMuteSolo: true,
       onProgress: (f) => opts.onProgress?.((i + f) / tracks.length),
     });
     out.push({ trackId: track.id, trackName: track.name, buffer });
