@@ -9,6 +9,7 @@ import { store } from './store';
 import {
   makeClip,
   makeTrack,
+  nextTrackIndex,
   MAX_TRACKS,
   uid,
   type AssetRef,
@@ -32,10 +33,9 @@ export function addTrack(): void {
     store.toast('warn', `The timeline holds ${MAX_TRACKS} tracks — enough complexity, few enough to stay legible.`);
     return;
   }
-  const index = p.tracks.length;
-  // Built once so undo can match the id. Filtering on `index` removed any
-  // track that happened to share it.
-  const track = makeTrack(index);
+  // The lowest free colour slot, not tracks.length: after a delete those
+  // differ, and reusing a live track's index would duplicate its colour.
+  const track = makeTrack(nextTrackIndex(p.tracks));
   history.push({
     label: 'Add track',
     do: (pr) => pr.tracks.push(structuredClone(track)),
@@ -43,6 +43,49 @@ export function addTrack(): void {
       pr.tracks = pr.tracks.filter((t) => t.id !== track.id);
     },
   });
+}
+
+/**
+ * Remove a track and everything on it. The last track stays: an empty timeline
+ * with nowhere to drop a sound is a dead end, not a state worth reaching.
+ */
+export function removeTrack(trackId: string): void {
+  const p = store.get().project;
+  if (p.tracks.length <= 1) {
+    store.toast('info', 'A project keeps at least one track.');
+    return;
+  }
+  const index = p.tracks.findIndex((t) => t.id === trackId);
+  if (index < 0) return;
+  const removed = structuredClone(p.tracks[index]);
+  const clipCount = removed.clips.length;
+
+  history.push({
+    label: clipCount > 0 ? `Delete track (${clipCount} clip${clipCount === 1 ? '' : 's'})` : 'Delete track',
+    do: (pr) => {
+      pr.tracks = pr.tracks.filter((t) => t.id !== trackId);
+    },
+    // Back in its original position, not appended, so the timeline does not
+    // reshuffle under the student on undo.
+    undo: (pr) => pr.tracks.splice(index, 0, structuredClone(removed)),
+  });
+
+  const selection = store.get().ui.selection;
+  if (selection.trackId === trackId) store.patchUi({ selection: { trackId: null, clipId: null } });
+  if (store.get().ui.automationView?.trackId === trackId) store.patchUi({ automationView: null });
+}
+
+/** Master bus trim in dB — coalesced like any other fader. */
+export function setMasterGain(db: number): void {
+  coalescedEdit(
+    'master:gain',
+    'Master gain',
+    (p) => p.masterGain ?? 0,
+    (p, v) => {
+      p.masterGain = v;
+    },
+    db,
+  );
 }
 
 /** Place an already-imported asset as a new clip on `trackId` at `start`. */

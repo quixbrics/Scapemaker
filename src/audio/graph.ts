@@ -81,7 +81,9 @@ export function buildGraph(
 ): LiveGraph {
   const dest = opts.destination ?? (ctx as AudioContext).destination;
   const master = ctx.createGain();
-  master.gain.value = 1;
+  // NON-NEGOTIABLE #8 — applied here, once, so the mixdown matches what was
+  // heard. A stem is the track alone and carries no master trim.
+  master.gain.value = opts.ignoreMuteSolo ? 1 : dbToGain(project.masterGain ?? 0);
 
   let analyser: AnalyserNode | null = null;
   if (opts.withAnalyser) {
@@ -178,6 +180,12 @@ export function buildGraph(
 export function updateLiveMix(graph: LiveGraph, project: Project): void {
   const anySolo = project.tracks.some((t) => t.solo);
   const ramp = 0.02; // short ramp so a fader move doesn't click
+
+  graph.master.gain.setTargetAtTime(
+    dbToGain(project.masterGain ?? 0),
+    graph.master.context.currentTime,
+    ramp,
+  );
 
   for (const track of project.tracks) {
     const chain = graph.trackChains.get(track.id);

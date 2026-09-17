@@ -179,6 +179,11 @@ export interface Project {
   duration: number; // seconds — drives the ruler; never hardcode tick spacing
   sampleRate: typeof SAMPLE_RATE;
   tracks: Track[]; // max 8
+  /**
+   * Master bus gain in dB. The clipping banner has always told students to
+   * "lower the master"; until this existed there was nothing to lower.
+   */
+  masterGain: number;
   assets: Record<AssetId, AssetRef>;
   reflection: Reflection;
   view: ProjectView;
@@ -228,6 +233,17 @@ export function defaultReverb(): ReverbSettings {
   return { enabled: false, preset: 'street', size: 0.34, decay: 0.9, wet: 0.18, dry: 1 };
 }
 
+/**
+ * The lowest colour slot not already taken. Track `index` is the colour
+ * identity, so it must stay stable across a delete: numbering new tracks by
+ * `tracks.length` handed out an index a surviving track already held.
+ */
+export function nextTrackIndex(tracks: Track[]): number {
+  const used = new Set(tracks.map((t) => t.index));
+  for (let i = 0; i < MAX_TRACKS; i++) if (!used.has(i)) return i;
+  return tracks.length;
+}
+
 export function makeTrack(index: number, name?: string): Track {
   return {
     id: uid('trk'),
@@ -265,6 +281,7 @@ export function newProject(name = 'Untitled soundscape'): Project {
     modifiedAt: now,
     duration: 180, // 3:00 default; grows as clips are added
     sampleRate: SAMPLE_RATE,
+    masterGain: 0,
     tracks: Array.from({ length: 4 }, (_, i) => makeTrack(i)),
     assets: {},
     reflection: emptyReflection(),
@@ -311,6 +328,7 @@ export function migrate(raw: unknown): MigrationResult {
     }
   }
   project.reflection ??= emptyReflection();
+  project.masterGain ??= 0;
   project.view ??= { zoom: 6, scrollX: 0, theme: 'dark' };
 
   return { project, migratedFrom: version === SCHEMA_VERSION ? undefined : version, warnings };

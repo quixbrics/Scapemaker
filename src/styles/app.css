@@ -417,3 +417,18 @@
 /* The live region is a wrapper only — .toast inside it is position:fixed. */
 .toast-region { position: fixed; inset: auto; pointer-events: none; }
 .toast-region .toast { pointer-events: auto; }
+
+/* Track delete — quiet until the lane is hovered or the button is focused,
+   so it never competes with the name field it sits beside. */
+.h-del {
+  margin-left: auto; width: 18px; height: 18px; flex: 0 0 18px;
+  display: flex; align-items: center; justify-content: center;
+  border-radius: 3px; color: var(--text-faint); font-size: 14px; line-height: 1;
+  opacity: 0; transition: opacity .12s;
+}
+.lane:hover .h-del, .h-del:focus-visible { opacity: 1; }
+.h-del:hover { color: var(--danger); background: var(--danger-bg, transparent); }
+
+/* Master trim, under the meter readouts. */
+.master-fader { gap: 9px; }
+.master-fader .h-slider { flex: 1; }

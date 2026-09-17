@@ -11,10 +11,11 @@ import { transport } from '../audio/transport';
 import { renderProject } from '../audio/render';
 import { analyseBuffer, readLiveMeter, type BufferAnalysis } from '../audio/analysis';
 import { drawMasterWaveform } from './waveform';
-import { clear, h, timecode } from './dom';
+import { clear, h, timecode, fmtDb } from './dom';
 import { tt } from './tooltip';
 import { tokenAlpha } from './theme';
 import { contentEnd } from '../state/project';
+import { setMasterGain } from '../state/edits';
 
 const HEAD_W = 178;
 
@@ -37,7 +38,10 @@ export class MasterStrip {
     this.el.append(this.headEl, this.bodyEl);
     this.renderHead(-Infinity, -Infinity, null);
     store.subscribe((_s, changed) => {
-      if (changed.has('project')) this.scheduleAnalysis();
+      if (changed.has('project')) {
+        this.scheduleAnalysis();
+        this.syncFader();
+      }
     });
     this.scheduleAnalysis();
     this.loop();
@@ -49,7 +53,10 @@ export class MasterStrip {
 
   private scheduleAnalysis(): void {
     const p = store.get().project;
-    const sig = JSON.stringify(p.tracks.map((t) => ({ g: t.gain, m: t.muted, s: t.solo, c: t.clips })));
+    const sig = JSON.stringify({
+      master: p.masterGain,
+      tracks: p.tracks.map((t) => ({ g: t.gain, m: t.muted, s: t.solo, c: t.clips })),
+    });
     if (sig === this.lastSig) return;
     this.lastSig = sig;
     if (contentEnd(p) < 0.1) {
@@ -156,6 +163,64 @@ export class MasterStrip {
     );
   }
 
+  /**
+   * Built once and kept alive: it is a range input, so rebuilding the head
+   * around it mid-drag would replace the very control under the pointer.
+   */
+  private masterFader(): HTMLElement {
+    if (this.faderEl) return this.faderEl;
+    const toPct = (db: number) => Math.max(0, Math.min(100, ((db + 60) / 66) * 100));
+    const gain = () => store.get().project.masterGain ?? 0;
+    const fill = h('span', { class: 'fill', style: `width:${toPct(gain())}%` });
+    const readout = h('span', { class: 'h-db' }, fmtDb(gain()));
+    const input = h('input', {
+      type: 'range',
+      min: '-60',
+      max: '6',
+      step: '0.5',
+      value: String(gain()),
+      'aria-label': 'Master gain, decibels',
+      'aria-valuetext': `${fmtDb(gain())} dB`,
+      oninput: (e) => {
+        const target = e.target as HTMLInputElement;
+        const db = Number(target.value);
+        fill.style.width = `${toPct(db)}%`;
+        readout.textContent = fmtDb(db);
+        target.setAttribute('aria-valuetext', `${fmtDb(db)} dB`);
+        setMasterGain(db);
+      },
+    }) as HTMLInputElement;
+
+    this.faderInput = input;
+    this.faderFill = fill;
+    this.faderReadout = readout;
+    this.faderEl = h(
+      'div',
+      {
+        class: 'm-row master-fader',
+        ...tt('Master', 'Trims the whole mix, after every track. Pull this down if the mix is clipping.'),
+      },
+      h('div', { class: 'h-slider' }, fill, input),
+      readout,
+    );
+    return this.faderEl;
+  }
+
+  private faderEl: HTMLElement | null = null;
+  private faderInput: HTMLInputElement | null = null;
+  private faderFill: HTMLElement | null = null;
+  private faderReadout: HTMLElement | null = null;
+
+  /** Keep the fader in step with undo/redo, without fighting an active drag. */
+  private syncFader(): void {
+    if (!this.faderInput || document.activeElement === this.faderInput || isInteracting()) return;
+    const db = store.get().project.masterGain ?? 0;
+    this.faderInput.value = String(db);
+    this.faderInput.setAttribute('aria-valuetext', `${fmtDb(db)} dB`);
+    if (this.faderFill) this.faderFill.style.width = `${Math.max(0, Math.min(100, ((db + 60) / 66) * 100))}%`;
+    if (this.faderReadout) this.faderReadout.textContent = fmtDb(db);
+  }
+
   private renderHead(peakDb: number, rmsDb: number, lufs: number | null): void {
     clear(this.headEl);
     const peakCls = peakDb >= 0 ? 'danger' : peakDb >= -3 ? 'warn' : '';
@@ -173,7 +238,9 @@ export class MasterStrip {
         h('span', {}, 'Integrated'),
         h('span', { class: 'm-val mono' }, lufs == null ? '—' : `${lufs.toFixed(1)} LUFS`),
       ),
+      this.masterFader(),
     );
+    this.syncFader();
   }
 
   private loop(): void {

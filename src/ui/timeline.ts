@@ -23,6 +23,7 @@ import {
   toggleSolo,
   renameTrack,
   addTrack,
+  removeTrack,
   placeAsset,
 } from '../state/edits';
 import {
@@ -379,6 +380,24 @@ export class Timeline {
           onchange: (e) => renameTrack(track.id, (e.target as HTMLInputElement).value),
           onpointerdown: (e) => e.stopPropagation(),
         }),
+        h(
+          'button',
+          {
+            class: 'h-del',
+            ...tt(
+              'Delete track',
+              track.clips.length > 0
+                ? `Removes this track and its ${track.clips.length} clip${track.clips.length === 1 ? '' : 's'}. Undoable.`
+                : 'Removes this track. Undoable.',
+            ),
+            onpointerdown: (e) => e.stopPropagation(),
+            onclick: (e) => {
+              e.stopPropagation();
+              removeTrack(track.id);
+            },
+          },
+          '×',
+        ),
       ),
       auto
         ? this.automationHeadRow(track, auto.param)
