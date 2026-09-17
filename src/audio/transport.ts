@@ -129,12 +129,15 @@ class Transport {
   private onReachedEnd(): void {
     const { transport } = store.get();
     if (transport.looping && transport.loopEnd > transport.loopStart) {
-      this.stopGraph();
+      // Full teardown first. `stopGraph()` alone leaves `playing` true, and
+      // `startPlayback()` bails on its own `if (this.playing) return` guard —
+      // so the audio stopped at the loop point while the rAF tick kept running
+      // off the old clock basis and the playhead slid away past the loop end.
+      this.stop();
       store.patchTransport({ playhead: transport.loopStart });
       this.startPlayback();
     } else {
       this.stop();
-      store.patchTransport({ playhead: this.currentPosition() });
     }
   }
 
