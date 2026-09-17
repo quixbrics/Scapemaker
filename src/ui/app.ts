@@ -77,7 +77,7 @@ function wireKeyboard(): void {
 
     if (mod && e.key.toLowerCase() === 's') {
       e.preventDefault();
-      saveProjectToFile(store.get().project);
+      void saveProjectToFile(store.get().project, { saveAs: e.shiftKey });
       return;
     }
     if (mod && e.key.toLowerCase() === 'e') {

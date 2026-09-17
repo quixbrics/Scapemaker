@@ -12,6 +12,15 @@ import { assetStore } from '../audio/assetStore';
 import { store } from './store';
 import { history } from './history';
 import { downloadBlob, safeName } from '../export/download';
+import {
+  currentHandle,
+  ensureWritable,
+  isAbort,
+  pickSaveFile,
+  setCurrentHandle,
+  supportsFileSystemAccess,
+  writeToHandle,
+} from './fileHandle';
 
 const AUTOSAVE_DB = 'scapemaker-autosave';
 const AUTOSAVE_STORE = 'snapshots';
@@ -23,10 +32,43 @@ export function serialiseProject(project: Project): string {
   return JSON.stringify(project, null, 2);
 }
 
-export function saveProjectToFile(project: Project): void {
-  const blob = new Blob([serialiseProject(project)], { type: 'application/json' });
-  downloadBlob(blob, `${safeName(project.name)}.scapemaker`);
+/**
+ * Save the project. Where the browser supports it, this writes back to the
+ * file the student opened or last saved to, so repeated saves update one file
+ * instead of accumulating "Soundscape (9).scapemaker" in Downloads.
+ *
+ * `saveAs` forces the picker. Must be called from a user gesture: the
+ * permission prompt needs one, and every caller (button, Cmd+S) has one.
+ */
+export async function saveProjectToFile(project: Project, opts: { saveAs?: boolean } = {}): Promise<void> {
+  const text = serialiseProject(project);
+  const suggested = `${safeName(project.name)}.scapemaker`;
+
+  if (supportsFileSystemAccess()) {
+    try {
+      let handle = opts.saveAs ? null : currentHandle();
+      if (handle && !(await ensureWritable(handle))) handle = null; // grant lapsed; re-pick
+      if (!handle) handle = await pickSaveFile(suggested);
+      if (!handle) throw new Error('no picker');
+      await writeToHandle(handle, text);
+      setCurrentHandle(handle);
+      store.markSaved();
+      store.toast('info', `Saved to ${handle.name}.`, 2200);
+      return;
+    } catch (err) {
+      // Cancelling the picker is a decision, not a failure.
+      if (isAbort(err)) return;
+      // Anything else (no API, a read-only location): fall through to download.
+    }
+  }
+
+  downloadBlob(new Blob([text], { type: 'application/json' }), suggested);
   store.markSaved();
+}
+
+/** Where the next plain save will write, for the top bar to name. */
+export function currentFileName(): string | null {
+  return currentHandle()?.name ?? null;
 }
 
 export interface LoadResult {
@@ -87,6 +129,7 @@ export function startNewProject(): void {
   if (!confirmDiscardIfDirty('Start a new project')) return;
   store.setProject(newProject());
   history.clear();
+  setCurrentHandle(null); // a new project has no file yet
   void clearAutosave();
 }
 

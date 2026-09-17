@@ -20,7 +20,7 @@ import { toggleTheme, currentTheme } from './theme';
 import { restrictedCount } from '../licence/warnings';
 import { openExportDialog } from './dialogs/exportDialog';
 import { history } from '../state/history';
-import { saveProjectToFile, startNewProject } from '../state/persist';
+import { saveProjectToFile, startNewProject, currentFileName } from '../state/persist';
 import { openProjectFile } from './dialogs/openProject';
 
 export class TopBar {
@@ -128,7 +128,23 @@ export class TopBar {
 
     const newBtn = h('button', { class: 'btn', ...tt('New project', 'Starts empty. Asks first if you have unsaved changes.'), onclick: () => startNewProject() }, 'New');
     const openBtn = h('button', { class: 'btn', ...tt('Open project', 'Load a .scapemaker file. Asks first if you have unsaved changes.'), onclick: () => openProjectFile() }, 'Open');
-    const save = h('button', { class: 'btn', ...tt('Save project', 'Cmd/Ctrl + S — downloads a .scapemaker file'), onclick: () => saveProjectToFile(store.get().project) }, 'Save');
+    const file = currentFileName();
+    const save = h(
+      'button',
+      {
+        class: 'btn',
+        ...tt(
+          'Save project',
+          file
+            ? `Cmd/Ctrl + S — writes back to ${file}. Shift-click to save a copy.`
+            : 'Cmd/Ctrl + S — asks where to keep the .scapemaker file.',
+        ),
+        // Shift is the conventional "save a copy" modifier, and keeps a second
+        // button out of an already-crowded bar.
+        onclick: (e) => void saveProjectToFile(store.get().project, { saveAs: (e as MouseEvent).shiftKey }),
+      },
+      'Save',
+    );
     const exportBtn = h('button', { class: 'btn-primary', onclick: () => openExportDialog() }, 'Export');
 
     this.el.append(

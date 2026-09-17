@@ -8,8 +8,9 @@ import { mountApp } from './ui/app';
 import { store } from './state/store';
 import { readAutosave, applyLoadedProject, clearAutosave } from './state/persist';
 import { assetStore } from './audio/assetStore';
-import { newProject } from './state/project';
+import { newProject, type Project } from './state/project';
 import { ensurePersistentStorage } from './audio/storage';
+import { askToRecoverSession } from './ui/dialogs/recoverSession';
 
 const MIN_WIDTH = 1024;
 
@@ -37,19 +38,14 @@ async function boot(): Promise<void> {
 
   mountApp(app);
 
-  // Offer autosave recovery.
+  // Offer autosave recovery. The app is already mounted, so this is the app's
+  // own dialog rather than a browser confirm fired at a half-painted page.
   try {
     const snap = await readAutosave();
     if (snap && Date.now() - snap.savedAt < 1000 * 60 * 60 * 24 * 14) {
-      const when = new Date(snap.savedAt).toLocaleString();
-      if (window.confirm(`Recover your last session from ${when}?`)) {
+      if ((await askToRecoverSession(snap.project, snap.savedAt)) === 'recover') {
         applyLoadedProject(snap.project);
-        // best-effort: re-acquire cached assets
-        for (const ref of Object.values(snap.project.assets)) {
-          if (ref.downloadUrl || (await assetStore.isCached(ref.id))) {
-            assetStore.acquire(ref, { kind: 'url', url: ref.downloadUrl ?? '' }).catch(() => {});
-          }
-        }
+        await reacquireAssets(snap.project);
       } else {
         await clearAutosave();
       }
@@ -68,6 +64,29 @@ async function boot(): Promise<void> {
       e.returnValue = '';
     }
   });
+}
+
+/**
+ * Best-effort: bring back the audio a recovered project points at. Cached
+ * originals come from IndexedDB; anything else is re-fetched from its source
+ * URL. An asset with neither is left missing rather than retried against an
+ * empty URL, which is what the old `url: ref.downloadUrl ?? ''` did.
+ */
+async function reacquireAssets(project: Project): Promise<void> {
+  const used = new Set<string>();
+  for (const track of project.tracks) for (const clip of track.clips) used.add(clip.assetId);
+
+  await Promise.all(
+    [...used].map(async (id) => {
+      const ref = project.assets[id];
+      if (!ref) return;
+      const cached = await assetStore.isCached(id);
+      if (!cached && !ref.downloadUrl) return;
+      await assetStore
+        .acquire(ref, { kind: 'url', url: ref.downloadUrl ?? '' })
+        .catch(() => {});
+    }),
+  );
 }
 
 void boot();
