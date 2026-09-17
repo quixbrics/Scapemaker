@@ -30,7 +30,9 @@ export class Inspector {
   readonly el: HTMLElement;
 
   constructor() {
-    this.el = h('div', { class: 'panel-right scroll' });
+    // The panel chrome (width, border, tabs) belongs to RightPanel; this is
+    // just the scrolling pane inside it.
+    this.el = h('div', { class: 'pane-body scroll' });
     this.render(store.get());
     store.subscribe((s, changed) => {
       if (!changed.has('ui') && !changed.has('project')) return;

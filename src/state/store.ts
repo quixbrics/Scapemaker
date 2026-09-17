@@ -11,6 +11,7 @@ export type Workspace = 'discovery' | 'production';
 export type Mode = 'basic' | 'advanced';
 export type Tool = 'select' | 'trim' | 'split' | 'crossfade' | 'loop';
 export type DiscoveryTab = 'freesound' | 'archive' | 'map' | 'mine';
+export type RightTab = 'inspector' | 'reflection';
 
 export interface Selection {
   trackId: string | null;
@@ -54,6 +55,7 @@ export interface UiState {
   mode: Mode;
   tool: Tool;
   discoveryTab: DiscoveryTab;
+  rightTab: RightTab;
   snap: boolean;
   selection: Selection;
   automationView: AutomationView | null;
@@ -78,6 +80,7 @@ function initialUi(): UiState {
     mode: 'advanced',
     tool: 'select',
     discoveryTab: 'mine',
+    rightTab: 'inspector',
     snap: true,
     selection: { trackId: null, clipId: null },
     automationView: null,

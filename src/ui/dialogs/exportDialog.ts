@@ -10,12 +10,14 @@ import { store } from '../../state/store';
 import { runExport, type ExportSelection } from '../../export';
 import { restrictedAssetsInUse, NON_DISTRIBUTION_NOTICE } from '../../licence/warnings';
 import { contentEnd } from '../../state/project';
+import { reflectionProgress } from '../reflection';
 
 export function openExportDialog(): void {
   openDialog((close) => {
     const project = store.get().project;
     const restricted = restrictedAssetsInUse(project);
     const hasAudio = contentEnd(project) > 0.1;
+    const reflection = reflectionProgress(project.reflection);
 
     const sel: ExportSelection = { mixdown: hasAudio, stems: false, sources: true, reflection: true };
     const status = h('p', { style: 'min-height:18px;color:var(--text-faint)' }, '');
@@ -65,7 +67,13 @@ export function openExportDialog(): void {
         check('mixdown', 'Mixdown', `${project.name}_Final.wav (24-bit)`, !hasAudio),
         check('stems', 'Stems', 'one WAV per non-empty track', !hasAudio),
         check('sources', 'Sources CSV', 'every asset, licence and restriction'),
-        check('reflection', 'Reflection', 'markdown'),
+        check(
+          'reflection',
+          'Reflection',
+          reflection.written === 0
+            ? 'markdown — nothing written yet, this will export empty'
+            : `markdown — ${reflection.written} of ${reflection.total} prompts answered`,
+        ),
       ),
       restricted.length > 0
         ? h(

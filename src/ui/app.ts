@@ -11,12 +11,13 @@ import { installInteractionGuard } from './interaction';
 import { TopBar } from './topbar';
 import { Discovery } from './discovery';
 import { Timeline } from './timeline';
-import { Inspector } from './inspector';
+import { RightPanel } from './rightPanel';
 import { MasterStrip } from './master';
 import { splitClipAtPlayhead, duplicateClip, deleteClip, copySelectedClip, pasteClip } from '../state/edits';
 import { openExportDialog } from './dialogs/exportDialog';
 import { openProjectFile } from './dialogs/openProject';
 import { saveProjectToFile, scheduleAutosave } from '../state/persist';
+import { flushReflectionEdits } from './reflection';
 
 export function mountApp(root: HTMLElement): void {
   installIconSheet();
@@ -26,12 +27,12 @@ export function mountApp(root: HTMLElement): void {
   const topbar = new TopBar();
   const discovery = new Discovery();
   const timeline = new Timeline();
-  const inspector = new Inspector();
+  const rightPanel = new RightPanel();
   const master = new MasterStrip();
 
   timeline.getMasterHost().replaceWith(master.el);
 
-  const body = h('div', { class: 'body' }, discovery.el, timeline.el, inspector.el);
+  const body = h('div', { class: 'body' }, discovery.el, timeline.el, rightPanel.el);
   root.append(h('div', { class: 'shell' }, topbar.el, body));
   root.removeAttribute('aria-busy');
 
@@ -54,6 +55,10 @@ function wireKeyboard(): void {
     const target = e.target as HTMLElement;
     const typing = /^(INPUT|TEXTAREA|SELECT)$/.test(target.tagName) || target.isContentEditable;
     const mod = e.metaKey || e.ctrlKey;
+
+    // Clicking Save or Export blurs the textarea and flushes on the way out;
+    // the keyboard path never leaves the field, so flush explicitly.
+    if (mod && 'seo'.includes(e.key.toLowerCase())) flushReflectionEdits();
 
     if (mod && e.key.toLowerCase() === 's') {
       e.preventDefault();

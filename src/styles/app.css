@@ -377,3 +377,27 @@
 
 .empty { padding: 28px 18px; color: var(--text-faint); font-size: 12px; line-height: 1.6; text-align: center; }
 .linkish { color: var(--accent-text); background: none; border: none; text-decoration: underline; cursor: pointer; font: inherit; }
+
+/* ---------- reflection panel (concept §9) ---------- */
+.pane-body { flex: 1; min-height: 0; }
+.tab-dot {
+  display: inline-block; width: 5px; height: 5px; margin-left: 6px;
+  border-radius: 50%; background: var(--accent); vertical-align: middle;
+}
+.reflection { padding: 14px 14px 22px; display: flex; flex-direction: column; gap: 16px; }
+.reflection-intro {
+  margin: 0; font-size: 11.5px; line-height: 1.5; color: var(--text-muted);
+}
+.reflection-field { display: flex; flex-direction: column; gap: 6px; }
+.reflection-head { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
+.reflection-count { font-size: 10px; color: var(--text-faint); }
+.reflection-input {
+  width: 100%; box-sizing: border-box; resize: vertical; min-height: 68px;
+  padding: 8px 10px; border: 1px solid var(--border); border-radius: 4px;
+  background: var(--inset); color: var(--text);
+  font: 400 12px/1.55 var(--font-ui);
+}
+.reflection-input::placeholder { color: var(--text-faint); }
+.reflection-input:focus {
+  outline: none; border-color: var(--accent-border); background: var(--panel);
+}
