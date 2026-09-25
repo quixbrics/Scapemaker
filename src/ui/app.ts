@@ -13,7 +13,19 @@ import { Discovery } from './discovery';
 import { Timeline } from './timeline';
 import { RightPanel } from './rightPanel';
 import { MasterStrip } from './master';
-import { splitClipAtPlayhead, duplicateClip, deleteClip, copySelectedClip, pasteClip } from '../state/edits';
+import {
+  splitClipAtPlayhead,
+  splitAllAt,
+  duplicateClip,
+  deleteClip,
+  copySelectedClip,
+  cutSelectedClip,
+  pasteClip,
+  nudgeClip,
+} from '../state/edits';
+import { installSidePanel, type SidePanel } from './panels';
+import { openShortcutSheet } from './dialogs/shortcuts';
+import { contentEnd, loopSpan } from '../state/project';
 import { openExportDialog } from './dialogs/exportDialog';
 import { openProjectFile } from './dialogs/openProject';
 import { saveProjectToFile, scheduleAutosave } from '../state/persist';
@@ -37,7 +49,12 @@ export function mountApp(root: HTMLElement): void {
   root.append(h('div', { class: 'shell' }, topbar.el, body));
   root.removeAttribute('aria-busy');
 
-  wireKeyboard();
+  const panels = [
+    installSidePanel(discovery.el, { side: 'left', key: 'library', label: 'Library', min: 240, max: 520 }),
+    installSidePanel(rightPanel.el, { side: 'right', key: 'inspector', label: 'Inspector', min: 250, max: 480 }),
+  ];
+
+  wireKeyboard(timeline, panels);
   wireToast();
 
   // autosave on every project change
@@ -65,7 +82,19 @@ export function mountApp(root: HTMLElement): void {
   });
 }
 
-function wireKeyboard(): void {
+/** Every clip start and end, for ↑ / ↓ (Premiere's previous / next edit point). */
+function editPoints(): number[] {
+  const pts = new Set<number>([0]);
+  for (const t of store.get().project.tracks) {
+    for (const c of t.clips) {
+      pts.add(c.start);
+      pts.add(c.start + loopSpan(c));
+    }
+  }
+  return [...pts].sort((a, b) => a - b);
+}
+
+function wireKeyboard(timeline: Timeline, panels: SidePanel[]): void {
   window.addEventListener('keydown', (e) => {
     const target = e.target as HTMLElement;
     const typing = /^(INPUT|TEXTAREA|SELECT)$/.test(target.tagName) || target.isContentEditable;
@@ -104,7 +133,8 @@ function wireKeyboard(): void {
     }
     if (mod && e.key.toLowerCase() === 'k') {
       e.preventDefault();
-      splitClipAtPlayhead();
+      if (e.shiftKey) splitAllAt(store.get().transport.playhead);
+      else splitClipAtPlayhead();
       return;
     }
     if (mod && e.key.toLowerCase() === 'c') {
@@ -112,11 +142,18 @@ function wireKeyboard(): void {
       copySelectedClip();
       return;
     }
+    if (mod && e.key.toLowerCase() === 'x') {
+      e.preventDefault();
+      cutSelectedClip();
+      return;
+    }
     if (mod && e.key.toLowerCase() === 'v') {
       e.preventDefault();
       pasteClip();
       return;
     }
+    // Anything else with Cmd/Ctrl held belongs to the browser (reload, find…).
+    if (mod) return;
 
     switch (e.key) {
       case ' ':
@@ -126,6 +163,55 @@ function wireKeyboard(): void {
       case 'Home':
         transport.goToStart();
         break;
+      case 'End':
+        transport.seek(contentEnd(store.get().project));
+        break;
+      case 'c':
+      case 'C':
+        store.patchUi({ tool: 'split' });
+        break;
+      case 's':
+      case 'S': {
+        const snap = !store.get().ui.snap;
+        store.patchUi({ snap });
+        store.toast('info', snap ? 'Snap on' : 'Snap off', 1200);
+        break;
+      }
+      case '=':
+      case '+':
+        e.preventDefault();
+        timeline.zoomBy(1.4);
+        break;
+      case '-':
+      case '_':
+        e.preventDefault();
+        timeline.zoomBy(1 / 1.4);
+        break;
+      case '\\':
+        e.preventDefault();
+        timeline.zoomToFit();
+        break;
+      case '`': {
+        // Premiere's "maximise panel": fold both sides away, or bring them back.
+        const anyOpen = panels.some((p) => !p.collapsed);
+        for (const p of panels) p.setCollapsed(anyOpen);
+        break;
+      }
+      case '?':
+        openShortcutSheet();
+        break;
+      case 'ArrowUp':
+      case 'ArrowDown': {
+        e.preventDefault();
+        const at = store.get().transport.playhead;
+        const pts = editPoints();
+        const next =
+          e.key === 'ArrowUp'
+            ? [...pts].reverse().find((t) => t < at - 1e-3)
+            : pts.find((t) => t > at + 1e-3);
+        if (next !== undefined) transport.seek(next);
+        break;
+      }
       case 'v':
       case 'V':
         store.patchUi({ tool: 'select' });
@@ -171,14 +257,12 @@ function wireKeyboard(): void {
         break;
       case 'ArrowLeft':
       case 'ArrowRight': {
-        const { trackId, clipId } = store.get().ui.selection;
-        if (!trackId || !clipId) break;
         e.preventDefault();
-        const nudge = (e.shiftKey ? 1 : 0.1) * (e.key === 'ArrowLeft' ? -1 : 1);
-        store.mutateProject((p) => {
-          const c = p.tracks.find((t) => t.id === trackId)?.clips.find((x) => x.id === clipId);
-          if (c) c.start = Math.max(0, c.start + nudge);
-        });
+        const step = (e.shiftKey ? 1 : 0.1) * (e.key === 'ArrowLeft' ? -1 : 1);
+        const { trackId, clipId } = store.get().ui.selection;
+        // With a clip selected the arrows move the clip; otherwise the playhead.
+        if (trackId && clipId) nudgeClip(trackId, clipId, step);
+        else transport.seek(Math.max(0, store.get().transport.playhead + step));
         break;
       }
     }

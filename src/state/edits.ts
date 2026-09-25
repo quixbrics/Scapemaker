@@ -18,7 +18,7 @@ import {
   type Track,
 } from './project';
 import { assetStore } from '../audio/assetStore';
-import { fitDuration } from './project';
+import { fitDuration, loopSpan } from './project';
 
 function findTrack(p: Project, id: string): Track | undefined {
   return p.tracks.find((t) => t.id === id);
@@ -153,6 +153,30 @@ export function moveClip(trackId: string, clipId: string, newStart: number, newT
 }
 
 /**
+ * Option/Alt-drag: leave the original where it was and drop a copy where the
+ * drag ended — on the same track or another. Same asset, no new audio.
+ */
+export function duplicateClipTo(trackId: string, clipId: string, newStart: number, targetTrackId = trackId): void {
+  const p = store.get().project;
+  const clip = findClip(p, trackId, clipId);
+  if (!clip || !findTrack(p, targetTrackId)) return;
+  const newId = uid('clp');
+  const copy: Clip = { ...structuredClone(clip), id: newId, start: Math.max(0, newStart) };
+  history.push({
+    label: 'Duplicate clip',
+    do(pr) {
+      findTrack(pr, targetTrackId)?.clips.push(structuredClone(copy));
+      pr.duration = fitDuration(pr);
+    },
+    undo(pr) {
+      const t = findTrack(pr, targetTrackId);
+      if (t) t.clips = t.clips.filter((c) => c.id !== newId);
+    },
+  });
+  store.patchUi({ selection: { trackId: targetTrackId, clipId: newId } });
+}
+
+/**
  * Crossfade tool (UI spec §4.5 / Build Plan §7.5): drag a clip to overlap its
  * same-track neighbour, and the overlap becomes a crossfade — the earlier
  * clip's fade-out and the later clip's fade-in both set to the overlap length.
@@ -259,39 +283,119 @@ export function trimClip(
 }
 
 export function splitClipAtPlayhead(): void {
-  const { project, transport, ui } = store.get();
+  const { transport, ui } = store.get();
   const { trackId, clipId } = ui.selection;
   if (!trackId || !clipId) {
-    store.toast('info', 'Select a clip first, then split at the playhead — Cmd/Ctrl + K.');
+    store.toast('info', 'Select a clip first, then split at the playhead — Cmd/Ctrl + K. Or use the razor (C) to cut anywhere.');
     return;
   }
-  const clip = findClip(project, trackId, clipId);
-  if (!clip) return;
-  const at = transport.playhead;
-  if (at <= clip.start + 0.02 || at >= clip.start + clip.duration - 0.02) {
-    store.toast('info', 'Move the playhead over the selected clip to split it.');
-    return;
-  }
-  const offsetIntoClip = at - clip.start;
+  const reason = splitClipAt(trackId, clipId, transport.playhead);
+  if (reason === 'outside') store.toast('info', 'Move the playhead over the selected clip to split it.');
+}
 
+/** Why a cut could not happen, or null if it did. */
+export type SplitRefusal = 'outside' | 'looping' | 'missing';
+
+/** Minimum length either half of a cut may have, in seconds. */
+const MIN_PIECE = 0.02;
+
+/**
+ * Cut one clip in two at timeline time `at`. The halves are two views onto the
+ * same asset, so nothing is copied and nothing is lost: drag either edge back
+ * out and the audio is still there.
+ */
+export function splitClipAt(trackId: string, clipId: string, at: number): SplitRefusal | null {
+  const clip = findClip(store.get().project, trackId, clipId);
+  if (!clip) return 'missing';
+  const refusal = splitRefusal(clip, at);
+  if (refusal) {
+    if (refusal === 'looping') store.toast('info', LOOP_SPLIT_HINT);
+    return refusal;
+  }
+  const rightId = uid('clp');
+  history.push(trackEditCommand('Split clip', trackId, (pr) => splitInPlace(findTrack(pr, trackId)!, clipId, at, rightId)));
+  // The half under the cursor stays selected, so a second cut keeps going the same way.
+  store.patchUi({ selection: { trackId, clipId: rightId } });
+  return null;
+}
+
+/**
+ * Cmd/Ctrl + Shift + K, or a Shift-click with the razor: cut every clip the
+ * line crosses, on every track, as ONE undo step.
+ */
+export function splitAllAt(at: number): number {
+  const p = store.get().project;
+  const cuts = p.tracks.flatMap((t) =>
+    t.clips.filter((c) => splitRefusal(c, at) === null).map((c) => ({ trackId: t.id, clipId: c.id, rightId: uid('clp') })),
+  );
+  if (cuts.length === 0) {
+    store.toast('info', 'Nothing to cut there — no clip crosses that point.');
+    return 0;
+  }
   history.push(
-    trackEditCommand('Split clip', trackId, (pr) => {
-      const t = findTrack(pr, trackId)!;
-      const i = t.clips.findIndex((c) => c.id === clipId);
-      const c = t.clips[i];
-      const right: Clip = {
-        ...structuredClone(c),
-        id: uid('clp'),
-        start: c.start + offsetIntoClip,
-        sourceOffset: c.sourceOffset + offsetIntoClip,
-        duration: c.duration - offsetIntoClip,
-        fadeIn: { duration: 0, curve: c.fadeIn.curve },
-      };
-      c.duration = offsetIntoClip;
-      c.fadeOut = { duration: 0, curve: c.fadeOut.curve };
-      t.clips.splice(i + 1, 0, right);
+    allTracksCommand(`Split ${cuts.length} clip${cuts.length === 1 ? '' : 's'}`, (pr) => {
+      for (const cut of cuts) {
+        const t = findTrack(pr, cut.trackId);
+        if (t) splitInPlace(t, cut.clipId, at, cut.rightId);
+      }
     }),
   );
+  return cuts.length;
+}
+
+const LOOP_SPLIT_HINT = 'This clip is looping. Set Loop × back to 1 in the Inspector before cutting it.';
+
+function splitRefusal(clip: Clip, at: number): SplitRefusal | null {
+  // A looping clip's one `duration` describes every repeat; cutting it would
+  // need to unroll the loop into separate clips first.
+  if (clip.loop?.enabled && clip.loop.count > 1) {
+    return at > clip.start + MIN_PIECE && at < clip.start + loopSpan(clip) - MIN_PIECE ? 'looping' : 'outside';
+  }
+  if (at <= clip.start + MIN_PIECE || at >= clip.start + clip.duration - MIN_PIECE) return 'outside';
+  return null;
+}
+
+function splitInPlace(t: Track, clipId: string, at: number, rightId: string): void {
+  const i = t.clips.findIndex((c) => c.id === clipId);
+  if (i < 0) return;
+  const c = t.clips[i];
+  const offsetIntoClip = at - c.start;
+  const right: Clip = {
+    ...structuredClone(c),
+    id: rightId,
+    start: c.start + offsetIntoClip,
+    sourceOffset: c.sourceOffset + offsetIntoClip,
+    duration: c.duration - offsetIntoClip,
+    fadeIn: { duration: 0, curve: c.fadeIn.curve },
+  };
+  c.duration = offsetIntoClip;
+  c.fadeOut = { duration: 0, curve: c.fadeOut.curve };
+  t.clips.splice(i + 1, 0, right);
+}
+
+/** Snapshot every track (and the duration) — for edits that span tracks. */
+function allTracksCommand(label: string, mutate: (p: Project) => void): Command {
+  let before: string | null = null;
+  let after: string | null = null;
+  const snap = (p: Project) => JSON.stringify({ tracks: p.tracks, duration: p.duration });
+  const restore = (p: Project, s: string) => {
+    const v = JSON.parse(s) as { tracks: Track[]; duration: number };
+    p.tracks = v.tracks;
+    p.duration = v.duration;
+  };
+  return {
+    label,
+    do(p) {
+      if (before === null) {
+        before = snap(p);
+        mutate(p);
+        after = snap(p);
+      } else if (after) restore(p, after);
+    },
+    undo(p) {
+      if (before) restore(p, before);
+    },
+  };
 }
 
 // --- copy / paste --------------------------------------------------------
@@ -306,6 +410,17 @@ export function copySelectedClip(): void {
   if (!clip) return;
   clipboard = { clip: structuredClone(clip), trackId };
   store.toast('info', 'Clip copied — Cmd/Ctrl + V to paste at the playhead.', 2200);
+}
+
+/** Cmd/Ctrl+X — copy, then remove from the timeline. */
+export function cutSelectedClip(): void {
+  const { trackId, clipId } = store.get().ui.selection;
+  if (!trackId || !clipId) return;
+  const clip = findClip(store.get().project, trackId, clipId);
+  if (!clip) return;
+  clipboard = { clip: structuredClone(clip), trackId };
+  deleteClip(trackId, clipId);
+  store.toast('info', 'Clip cut — Cmd/Ctrl + V to paste at the playhead.', 2200);
 }
 
 /**
@@ -418,6 +533,71 @@ export function setClipFade(
       c[which] = { duration: Math.max(0, duration), curve: curve ?? c[which].curve };
     }),
   );
+}
+
+// --- clip params (coalesced, like the faders) -------------------------------
+
+function setClipField<K extends 'gain' | 'pan' | 'start'>(
+  trackId: string,
+  clipId: string,
+  field: K,
+  value: Clip[K],
+  label: string,
+): void {
+  if (!findClip(store.get().project, trackId, clipId)) return;
+  coalescedEdit(
+    `${clipId}:${field}`,
+    label,
+    (p) => findClip(p, trackId, clipId)?.[field] as Clip[K],
+    (p, v) => {
+      const c = findClip(p, trackId, clipId);
+      if (!c) return;
+      c[field] = v;
+      if (field === 'start') p.duration = fitDuration(p);
+    },
+    value,
+  );
+}
+
+/** Clip gain in dB. The Inspector slider used to write this with no undo at all. */
+export const setClipGain = (trackId: string, clipId: string, db: number) =>
+  setClipField(trackId, clipId, 'gain', db, 'Clip gain');
+
+/** Clip pan, -1 (left) .. 1 (right). */
+export const setClipPan = (trackId: string, clipId: string, pan: number) =>
+  setClipField(trackId, clipId, 'pan', Math.max(-1, Math.min(1, pan)), 'Clip pan');
+
+/**
+ * Arrow-key nudge. A held key auto-repeats, so a run of nudges is one undo
+ * step — these used to bypass history entirely and could not be undone.
+ */
+export function nudgeClip(trackId: string, clipId: string, deltaSeconds: number): void {
+  const clip = findClip(store.get().project, trackId, clipId);
+  if (!clip) return;
+  setClipField(trackId, clipId, 'start', Math.max(0, clip.start + deltaSeconds), 'Nudge clip');
+}
+
+// --- master ----------------------------------------------------------------
+
+/** Where Auto-level puts the loudest moment of the mix: a hair under full scale. */
+export const AUTO_LEVEL_TARGET_DB = -1;
+
+/**
+ * The master setting that puts a mix peaking at `peakDb` (measured WITH the
+ * current master applied) at `targetDb`. Clamped to the fader's own range.
+ * Returns null for silence — there is nothing to level.
+ */
+export function autoLevelMaster(peakDb: number, currentMasterDb: number, targetDb = AUTO_LEVEL_TARGET_DB): number | null {
+  if (!isFinite(peakDb)) return null;
+  const next = currentMasterDb + (targetDb - peakDb);
+  return Math.round(Math.max(-60, Math.min(6, next)) * 10) / 10;
+}
+
+/** One discrete undo step, never folded into a fader drag either side of it. */
+export function applyMasterGain(db: number): void {
+  endCoalescedEdit();
+  setMasterGain(db);
+  endCoalescedEdit();
 }
 
 // --- track params (coalesced; not every drag frame is a discrete undo) -----

@@ -1,7 +1,12 @@
 /*
  * Timeline: toolbar, ruler (tick spacing DERIVED from project.duration, never
  * hardcoded — UI spec §4.4), canvas track lanes with contour waveforms, and
- * pointer interaction: select, move, trim, split, duplicate, delete, with snap.
+ * pointer interaction: select, move, trim, razor, duplicate, delete, with snap.
+ *
+ * Every drag leaves the clip where it is (dimmed) and draws a GHOST where it
+ * will land — in whichever lane the pointer is over — with a readout of the
+ * new time or length. Nothing is committed until the pointer comes up, and
+ * Escape throws the whole gesture away.
  */
 
 import { store, type AppState, type PendingImport } from '../state/store';
@@ -16,8 +21,10 @@ import { licenceShort, licenceTone } from '../licence/model';
 import {
   moveClip,
   moveClipWithCrossfade,
+  duplicateClipTo,
   trimClip,
-  splitClipAtPlayhead,
+  splitClipAt,
+  splitAllAt,
   setTrackGain,
   toggleMute,
   toggleSolo,
@@ -38,15 +45,33 @@ import {
 } from '../state/effectEdits';
 import { evaluateAt } from '../audio/automation';
 import { AUTOMATION_PARAMS, AUTOMATION_PARAM_LIST, toUnit, fromUnit } from './automationParams';
-import { loopSpan, type AutomationParam, type Clip, type Track } from '../state/project';
+import { contentEnd, loopSpan, type AutomationParam, type Clip, type Track } from '../state/project';
 import { dragLoopClip, loopCountForSpan } from '../state/edits';
-import { importResultToTimeline, cancelImport } from '../sources/importResult';
-import { ASSET_DND_TYPE, SEARCH_RESULT_DND_TYPE } from './dnd';
+import { importResultToTimeline, cancelImport, placeLibraryAsset } from '../sources/importResult';
+import { importFiles } from '../sources/local';
+import { registerDropTarget, type DragMods, type LibraryPayload } from './dnd';
 import { MemoryMeter } from './memoryMeter';
-import type { SoundResult } from '../sources/types';
+import { openShortcutSheet } from './dialogs/shortcuts';
 
 const HEAD_W = 178;
 const CLIP_HEAD_H = 15;
+
+/** Pixels per second at either end of the zoom range. */
+export const ZOOM_MIN = 2;
+export const ZOOM_MAX = 120;
+/** The zoom slider is logarithmic: every step looks like the same amount of zoom. */
+const SLIDER_STEPS = 1000;
+const zoomToSlider = (z: number) =>
+  Math.round((Math.log(z / ZOOM_MIN) / Math.log(ZOOM_MAX / ZOOM_MIN)) * SLIDER_STEPS);
+const sliderToZoom = (v: number) => ZOOM_MIN * Math.pow(ZOOM_MAX / ZOOM_MIN, v / SLIDER_STEPS);
+const clampZoom = (z: number) => Math.max(ZOOM_MIN, Math.min(ZOOM_MAX, z));
+
+/** How close (px) an edge has to come to another before it clicks onto it. */
+const SNAP_PX = 8;
+/** Movement (px) before a press on a clip becomes a drag. */
+const DRAG_THRESHOLD = 3;
+/** Width (px) of the band at each side of the lanes that scrolls during a drag. */
+const EDGE_SCROLL_PX = 48;
 
 /** Tools that only appear in Advanced. */
 const ADVANCED_TOOLS = new Set(['crossfade', 'loop']);
@@ -70,9 +95,17 @@ export class Timeline {
     this.buildToolbar();
     this.buildRuler();
     this.buildLanes();
+    registerDropTarget({
+      hover: (x, y, payload, mods) => this.libraryHover(x, y, payload, mods),
+      leave: () => this.hideGuides(),
+      drop: (x, y, payload, mods) => this.libraryDrop(x, y, payload, mods),
+    });
     this.unsubTheme = onThemeChange(() => this.renderLanes(store.get()));
     this.lastSig = this.laneSignature(store.get());
     this.lastProjectId = store.get().project.id;
+    assetStore.subscribe(() => {
+      for (const paint of this.unpainted) if (paint()) this.unpainted.delete(paint);
+    });
     store.subscribe((s, changed) => {
       if (changed.has('project') && s.project.id !== this.lastProjectId) {
         this.lastProjectId = s.project.id;
@@ -185,18 +218,18 @@ export class Timeline {
     const group = h(
       'div',
       { class: 'toolgroup' },
-      mk('select', 'c-cursor', 'Select', 'V'),
-      mk('trim', 'c-trim', 'Trim', 'Drag a clip edge — T'),
-      mk('split', 'c-split', 'Split at playhead', 'Cmd/Ctrl + K'),
-      mk('crossfade', 'c-fade', 'Crossfade', 'Overlap two clips to blend them — F'),
-      mk('loop', 'c-loop', 'Loop', 'Drag a clip’s edge to repeat it for as long as you drag — R'),
+      mk('select', 'c-cursor', 'Select — V', 'Drag to move · Option/Alt-drag to copy · drag an edge to trim'),
+      mk('trim', 'c-trim', 'Trim — T', 'Drag either half of a clip to trim that edge'),
+      mk('split', 'c-razor', 'Razor — C', 'Click a clip to cut it there · Shift-click cuts every track'),
+      mk('crossfade', 'c-fade', 'Crossfade — F', 'Overlap two clips to blend them'),
+      mk('loop', 'c-loop', 'Loop — R', 'Drag a clip’s edge to repeat it for as long as you drag'),
     );
 
     this.snapBtn = h(
       'button',
       {
         class: 'toggle',
-        ...tt('Snap to grid', 'Clips land on ruler divisions while dragging.'),
+        ...tt('Snap — S', 'Edges click onto other clips, the playhead and the ruler. Hold Cmd/Ctrl while dragging to ignore it.'),
         onclick: () => store.patchUi({ snap: !store.get().ui.snap }),
       },
       h('span', { class: 'knob' }),
@@ -206,14 +239,13 @@ export class Timeline {
 
     this.zoomInput = h('input', {
       type: 'range',
-      min: '2',
-      max: '40',
+      min: '0',
+      max: String(SLIDER_STEPS),
       step: '1',
-      value: String(s.project.view.zoom),
-      ...tt('Zoom', 'Pixels per second. The timeline scrolls horizontally when it no longer fits.'),
+      value: String(zoomToSlider(clampZoom(s.project.view.zoom))),
+      ...tt('Zoom', 'Option/Alt + scroll over the lanes, or = and −. Backslash fits the whole piece.'),
       oninput: (e) => {
-        const zoom = Number((e.target as HTMLInputElement).value);
-        store.mutateProject((p) => (p.view.zoom = zoom), { markDirty: false });
+        this.setZoom(sliderToZoom(Number((e.target as HTMLInputElement).value)));
       },
     }) as HTMLInputElement;
 
@@ -230,6 +262,11 @@ export class Timeline {
         'button',
         { class: 'tool', ...tt('Add track', `Up to 8 tracks`), onclick: () => addTrack() },
         svgIcon('c-plus', 14),
+      ),
+      h(
+        'button',
+        { class: 'tool kbd-btn', ...tt('Keyboard shortcuts', 'Press ? at any time'), onclick: () => openShortcutSheet() },
+        '?',
       ),
     );
     this.renderToolbar(s);
@@ -249,8 +286,10 @@ export class Timeline {
     this.countEl.textContent = `${nEmpty} OF ${s.project.tracks.length} TRACKS · ${nClips} CLIPS`;
     // don't fight the user's own drag
     if (document.activeElement !== this.zoomInput && !isInteracting()) {
-      this.zoomInput.value = String(s.project.view.zoom);
+      this.zoomInput.value = String(zoomToSlider(clampZoom(s.project.view.zoom)));
     }
+    // Lets CSS give each tool its own cursor.
+    this.el.dataset.tool = s.ui.tool;
   }
 
   // ---- geometry ----
@@ -261,6 +300,79 @@ export class Timeline {
   /** Width of the scrollable time content, in px. */
   private contentWidth(s: AppState): number {
     return Math.max(240, s.project.duration * this.pxPerSec(s));
+  }
+  /**
+   * Pixels per second as actually drawn. Differs from the zoom only when a
+   * short project is stretched to the 240px minimum width.
+   */
+  private effPps(s: AppState): number {
+    return this.contentWidth(s) / (s.project.duration || 1);
+  }
+  /** Timeline seconds under a client x, measured against a lane body (which scrolls). */
+  private timeAt(body: HTMLElement, clientX: number): number {
+    return (clientX - body.getBoundingClientRect().left) / this.effPps(store.get());
+  }
+
+  // ---- zoom ----
+  private zoomRaf = 0;
+  private zoomWanted: { zoom: number; anchorT?: number; anchorPx?: number } | null = null;
+
+  /**
+   * Change zoom, optionally keeping timeline second `anchorT` under the same
+   * on-screen x (`anchorPx`, from the left of the time area) — so zooming
+   * with the pointer over a clip zooms INTO that clip rather than toward 0:00.
+   * Coalesced to one rebuild per frame; a trackpad sends dozens of events.
+   */
+  setZoom(zoom: number, anchorT?: number, anchorPx?: number): void {
+    this.zoomWanted = { zoom: clampZoom(zoom), anchorT, anchorPx };
+    if (this.zoomRaf) return;
+    this.zoomRaf = requestAnimationFrame(() => {
+      this.zoomRaf = 0;
+      const want = this.zoomWanted;
+      this.zoomWanted = null;
+      if (!want) return;
+      const s = store.get();
+      if (Math.abs(want.zoom - s.project.view.zoom) < 1e-3) return;
+      const visibleW = Math.max(1, this.lanesScroll.clientWidth - HEAD_W);
+      const anchorPx = want.anchorPx ?? visibleW / 2;
+      const anchorT = want.anchorT ?? (this.lanesScroll.scrollLeft + anchorPx) / this.effPps(s);
+      store.mutateProject((p) => (p.view.zoom = want.zoom), { markDirty: false });
+      this.lanesScroll.scrollLeft = Math.max(0, anchorT * this.effPps(store.get()) - anchorPx);
+    });
+  }
+
+  /** `=` / `−`: zoom around the playhead if it is on screen, else the middle. */
+  zoomBy(factor: number): void {
+    const s = store.get();
+    const visibleW = this.lanesScroll.clientWidth - HEAD_W;
+    const phPx = s.transport.playhead * this.effPps(s) - this.lanesScroll.scrollLeft;
+    const base = this.zoomWanted?.zoom ?? s.project.view.zoom;
+    if (phPx >= 0 && phPx <= visibleW) this.setZoom(base * factor, s.transport.playhead, phPx);
+    else this.setZoom(base * factor);
+  }
+
+  /** Backslash: the whole piece, edge to edge. */
+  zoomToFit(): void {
+    const s = store.get();
+    const end = Math.max(contentEnd(s.project), 10);
+    const visibleW = Math.max(100, this.lanesScroll.clientWidth - HEAD_W - 24);
+    this.setZoom(visibleW / end, 0, 0);
+  }
+
+  private onWheel(e: WheelEvent): void {
+    // Option/Alt + scroll zooms (as in Premiere and Audition). A trackpad
+    // pinch arrives as a wheel event with ctrlKey set; without catching it
+    // here the browser zooms the whole page instead.
+    if (!e.altKey && !e.ctrlKey) return;
+    e.preventDefault();
+    const s = store.get();
+    const delta = e.deltaY || e.deltaX;
+    const rate = e.ctrlKey && !e.altKey ? 0.01 : 0.0015;
+    const rect = this.lanesScroll.getBoundingClientRect();
+    const anchorPx = Math.max(0, e.clientX - rect.left - HEAD_W);
+    const base = this.zoomWanted?.zoom ?? s.project.view.zoom;
+    const anchorT = (this.lanesScroll.scrollLeft + anchorPx) / this.effPps(s);
+    this.setZoom(base * Math.exp(-delta * rate), anchorT, anchorPx);
   }
 
   // ---- ruler ----
@@ -325,6 +437,11 @@ export class Timeline {
         store.mutateProject((p) => (p.view.scrollX = seconds), { markDirty: false });
       }
     });
+    this.lanesScroll.addEventListener('wheel', (e) => this.onWheel(e), { passive: false });
+    this.lanesScroll.addEventListener('pointermove', (e) => this.razorHover(e));
+    this.lanesScroll.addEventListener('pointerleave', () => this.hideRazor());
+    window.addEventListener('keydown', (e) => e.key === 'Shift' && this.razorHover(null, true));
+    window.addEventListener('keyup', (e) => e.key === 'Shift' && this.razorHover(null, false));
     const wrap = h('div', { class: 'lanes-wrap' }, this.lanesScroll);
     this.el.append(wrap);
     this.buildMasterPlaceholder();
@@ -340,7 +457,16 @@ export class Timeline {
     return this.masterHost;
   }
 
+  /**
+   * Clips drawn before their audio had decoded — every clip of a reopened
+   * session, which is restored before its sounds are. They are painted when
+   * the asset store says something new has arrived; before, they stayed
+   * blank until some unrelated edit happened to rebuild the lanes.
+   */
+  private unpainted = new Set<() => boolean>();
+
   private renderLanes(s: AppState): void {
+    this.unpainted.clear();
     const scrollTop = this.lanesScroll.scrollTop;
     const scrollLeft = this.lanesScroll.scrollLeft;
     clear(this.lanesInner);
@@ -355,7 +481,9 @@ export class Timeline {
     // playhead across lanes
     const ph = h('div', { class: 'playhead', style: `left:${HEAD_W}px` });
     ph.dataset.lanes = '1';
-    this.lanesInner.append(ph);
+    this.snapLine = h('div', { class: 'snap-line', hidden: true });
+    this.razorGuide = h('div', { class: 'razor-guide', hidden: true }, h('span', { class: 'razor-label' }));
+    this.lanesInner.append(ph, this.snapLine, this.razorGuide);
     this.lanesScroll.scrollTop = scrollTop;
     this.lanesScroll.scrollLeft = scrollLeft;
     if (this.rulerViewport) this.rulerViewport.scrollLeft = scrollLeft;
@@ -438,11 +566,19 @@ export class Timeline {
 
     const body = h('div', { class: 'lane-body', style: `width:${bodyW}px` });
     body.addEventListener('pointerdown', (e) => this.onLaneBodyDown(e, track));
-    body.addEventListener('dragover', (e) => e.preventDefault());
-    body.addEventListener('drop', (e) => this.onLaneDrop(e as DragEvent, track));
+    // Files straight from the desktop. Sounds from the library use pointer
+    // drags (see dnd.ts), not native drag-and-drop.
+    body.addEventListener('dragover', (e) => {
+      if (!e.dataTransfer?.types.includes('Files')) return;
+      e.preventDefault();
+      e.dataTransfer.dropEffect = 'copy';
+      this.highlightLane(body.parentElement);
+    });
+    body.addEventListener('dragleave', () => this.highlightLane(null));
+    body.addEventListener('drop', (e) => void this.onFileDrop(e as DragEvent, track));
 
     for (const clip of track.clips) {
-      body.append(this.renderClip(s, track, clip, pxPerSec, bodyW));
+      body.append(this.renderClip(s, track, clip, pxPerSec));
     }
     for (const pending of s.pendingImports) {
       if (pending.trackId === track.id) body.append(this.renderPendingClip(s, pending));
@@ -652,7 +788,6 @@ export class Timeline {
     track: Track,
     clip: Clip,
     pxPerSec: number,
-    bodyW: number,
   ): HTMLElement {
     const dur = s.project.duration;
     const leftPct = (clip.start / dur) * 100;
@@ -743,9 +878,9 @@ export class Timeline {
     );
 
     // paint waveform after layout
-    requestAnimationFrame(() => {
+    const paint = (): boolean => {
       const peaks = assetStore.getPeaks(clip.assetId);
-      if (!peaks) return;
+      if (!peaks) return false;
       canvas.style.width = '100%';
       canvas.style.height = `calc(100% - ${CLIP_HEAD_H}px)`;
       drawWaveform(canvas, peaks, clip.sourceOffset, clip.duration, pxPerSec, {
@@ -753,9 +888,13 @@ export class Timeline {
         fillAlpha: 0.2,
         strokeAlpha: 0.8,
       });
+      return true;
+    };
+    requestAnimationFrame(() => {
+      if (!paint()) this.unpainted.add(paint);
     });
 
-    el.addEventListener('pointerdown', (e) => this.onClipDown(e, track, clip, bodyW));
+    el.addEventListener('pointerdown', (e) => this.onClipDown(e, track, clip));
     return el;
   }
 
@@ -763,64 +902,241 @@ export class Timeline {
   private onLaneBodyDown(e: PointerEvent, track: Track): void {
     if ((e.target as HTMLElement).closest('.clip')) return;
     // click empty lane space: seek + select track
-    const body = e.currentTarget as HTMLElement;
-    const rect = body.getBoundingClientRect();
-    const frac = (e.clientX - rect.left) / rect.width;
-    transport.seek(frac * store.get().project.duration);
+    transport.seek(Math.max(0, this.timeAt(e.currentTarget as HTMLElement, e.clientX)));
     store.patchUi({ selection: { trackId: track.id, clipId: null } });
   }
 
-  private onLaneDrop(e: DragEvent, track: Track): void {
+  /** Audio files dragged straight from the desktop onto a lane. */
+  private async onFileDrop(e: DragEvent, track: Track): Promise<void> {
+    this.highlightLane(null);
+    const files = Array.from(e.dataTransfer?.files ?? []);
+    if (files.length === 0) return;
     e.preventDefault();
-    const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
-    const frac = (e.clientX - rect.left) / rect.width;
-    const start = this.snap(frac * store.get().project.duration);
-
-    const assetId = e.dataTransfer?.getData(ASSET_DND_TYPE);
-    if (assetId) {
-      const ref = store.get().project.assets[assetId] ?? assetStore.peek(assetId)?.ref;
-      if (ref) placeAsset(ref, track.id, start);
-      return;
+    let at = this.snapAt(this.timeAt(e.currentTarget as HTMLElement, e.clientX), { grid: true }).time;
+    store.toast('info', `Decoding ${files.length} file${files.length > 1 ? 's' : ''}…`, 60_000);
+    const { imported, errors } = await importFiles(files);
+    // Several files go end to end from the drop point, not stacked.
+    for (const ref of imported) {
+      placeAsset(ref, track.id, at);
+      at += ref.duration;
     }
+    if (errors.length) store.toast('error', `${errors.length} file${errors.length > 1 ? 's' : ''} skipped: ${errors[0].reason}`, 7000);
+    else store.toast('info', `Added ${imported.length} file${imported.length > 1 ? 's' : ''}.`, 2500);
+  }
 
-    const searchResultJson = e.dataTransfer?.getData(SEARCH_RESULT_DND_TYPE);
-    if (searchResultJson) {
-      try {
-        const result = JSON.parse(searchResultJson) as SoundResult;
-        void importResultToTimeline(result, { trackId: track.id, start }).then((res) => {
-          if (!res.ok && res.reason !== 'cancelled') store.toast('warn', res.reason ?? 'Import failed.');
-          else if (res.ok) store.toast('info', `Added “${result.title}”.`, 2500);
-        });
-      } catch {
-        store.toast('error', 'Could not read that dropped item.');
+  // ---- guides: ghost clip, snap line, lane highlight, razor ----
+  private ghostEl: HTMLElement | null = null;
+  private snapLine: HTMLElement | null = null;
+  private razorGuide: HTMLElement | null = null;
+  private highlighted: HTMLElement | null = null;
+
+  /**
+   * The outline of where a clip will be once the pointer comes up. A separate
+   * element from the clip itself, so the original stays put — you can see
+   * where it came from and where it is going at the same time.
+   */
+  private showGhost(body: HTMLElement, start: number, span: number, label: string, kind: string): void {
+    const dur = store.get().project.duration || 1;
+    if (!this.ghostEl) this.ghostEl = h('div', { class: 'clip-ghost' }, h('span', { class: 'ghost-label' }));
+    const g = this.ghostEl;
+    // Lanes can be rebuilt under a long drag (a download finishing, say).
+    if (g.parentElement !== body) body.append(g);
+    g.className = `clip-ghost ${kind}`;
+    g.style.left = `${((start / dur) * 100).toFixed(4)}%`;
+    g.style.width = `${((Math.max(0, span) / dur) * 100).toFixed(4)}%`;
+    (g.firstChild as HTMLElement).textContent = label;
+  }
+
+  /** A line through every lane at `t` while an edge is clicked onto something. */
+  private showSnapLine(t: number | null): void {
+    if (!this.snapLine) return;
+    this.snapLine.hidden = t == null;
+    if (t != null) this.snapLine.style.left = `${(HEAD_W + t * this.effPps(store.get())).toFixed(1)}px`;
+  }
+
+  private highlightLane(lane: HTMLElement | null): void {
+    if (this.highlighted === lane) return;
+    this.highlighted?.classList.remove('drop-target');
+    this.highlighted = lane;
+    lane?.classList.add('drop-target');
+  }
+
+  private hideGuides(): void {
+    this.ghostEl?.remove();
+    this.showSnapLine(null);
+    this.highlightLane(null);
+  }
+
+  /** The lane under a client y, or (with `clamp`) the nearest one. */
+  private laneAt(clientY: number, clamp: boolean): { trackId: string; body: HTMLElement; lane: HTMLElement } | null {
+    const lanes = [...this.lanesInner.querySelectorAll<HTMLElement>('.lane')];
+    if (lanes.length === 0) return null;
+    const pack = (lane: HTMLElement) => ({
+      trackId: lane.dataset.track!,
+      body: lane.querySelector<HTMLElement>('.lane-body')!,
+      lane,
+    });
+    for (const lane of lanes) {
+      const r = lane.getBoundingClientRect();
+      if (clientY >= r.top && clientY < r.bottom) return pack(lane);
+    }
+    if (!clamp) return null;
+    return pack(clientY < lanes[0].getBoundingClientRect().top ? lanes[0] : lanes[lanes.length - 1]);
+  }
+
+  /** Every edge worth snapping to: other clips' ends, the playhead, zero. */
+  private snapTargets(exclude?: string): number[] {
+    const s = store.get();
+    const pts = [0, s.transport.playhead];
+    for (const t of s.project.tracks) {
+      for (const c of t.clips) if (c.id !== exclude) pts.push(c.start, c.start + loopSpan(c));
+    }
+    return pts;
+  }
+
+  /**
+   * Snap time `t`. `offsets` are the edges being dragged, relative to `t` (a
+   * moved clip snaps by its start OR its end). Edges within SNAP_PX of a clip
+   * edge or the playhead click onto it — the line shows which. Failing that,
+   * with `grid`, `t` rounds to a quarter ruler division. Trims and cuts skip
+   * the grid: a quarter division is seconds wide when zoomed out.
+   */
+  private snapAt(
+    t: number,
+    opts: { offsets?: number[]; exclude?: string; grid?: boolean; bypass?: boolean } = {},
+  ): { time: number; line: number | null } {
+    const s = store.get();
+    if (!s.ui.snap || opts.bypass) return { time: Math.max(0, t), line: null };
+    const threshold = SNAP_PX / this.effPps(s);
+    let best: { d: number; line: number } | null = null;
+    for (const target of this.snapTargets(opts.exclude)) {
+      for (const off of opts.offsets ?? [0]) {
+        const d = target - (t + off);
+        if (Math.abs(d) <= threshold && (!best || Math.abs(d) < Math.abs(best.d))) best = { d, line: target };
       }
     }
+    if (best && t + best.d >= 0) return { time: t + best.d, line: best.line };
+    if (opts.grid) {
+      const step = this.tickInterval(s) / 4;
+      return { time: Math.max(0, Math.round(t / step) * step), line: null };
+    }
+    return { time: Math.max(0, t), line: null };
   }
 
-  private snap(seconds: number): number {
-    if (!store.get().ui.snap) return Math.max(0, seconds);
-    const step = this.tickInterval(store.get()) / 4;
-    return Math.max(0, Math.round(seconds / step) * step);
+  /**
+   * One step of scrolling when a drag is held near either side of the lanes.
+   * Returns true if the view moved, so the caller can redraw its ghost.
+   */
+  private edgeScroll(clientX: number): boolean {
+    const r = this.lanesScroll.getBoundingClientRect();
+    const left = r.left + HEAD_W;
+    let v = 0;
+    if (clientX < left + EDGE_SCROLL_PX) v = -(left + EDGE_SCROLL_PX - clientX);
+    else if (clientX > r.right - EDGE_SCROLL_PX) v = clientX - (r.right - EDGE_SCROLL_PX);
+    if (v === 0) return false;
+    const before = this.lanesScroll.scrollLeft;
+    this.lanesScroll.scrollLeft += Math.sign(v) * Math.min(24, Math.ceil(Math.abs(v) / 3));
+    return this.lanesScroll.scrollLeft !== before;
   }
 
-  private onClipDown(e: PointerEvent, track: Track, clip: Clip, bodyW: number): void {
+  // ---- library drops (see dnd.ts) ----
+  private libraryTarget: { trackId: string; start: number } | null = null;
+
+  private libraryHover(x: number, y: number, payload: LibraryPayload, mods: DragMods): boolean {
+    const r = this.lanesScroll.getBoundingClientRect();
+    const inside = x >= r.left + HEAD_W && x <= r.right && y >= r.top && y <= r.bottom;
+    const lane = inside ? this.laneAt(y, false) : null;
+    if (!lane) {
+      this.libraryTarget = null;
+      this.hideGuides();
+      return false;
+    }
+    this.edgeScroll(x);
+    const span = payload.duration > 0 ? payload.duration : 8;
+    const snapped = this.snapAt(this.timeAt(lane.body, x), { offsets: [0, span], grid: true, bypass: mods.bypassSnap });
+    const label = `${payload.title}  ·  ${timecode(snapped.time)}${payload.duration > 0 ? '' : '  ·  length unknown'}`;
+    this.showGhost(lane.body, snapped.time, span, label, 'drop');
+    this.showSnapLine(snapped.line);
+    this.highlightLane(lane.lane);
+    this.libraryTarget = { trackId: lane.trackId, start: snapped.time };
+    return true;
+  }
+
+  private libraryDrop(x: number, y: number, payload: LibraryPayload, mods: DragMods): boolean {
+    this.libraryHover(x, y, payload, mods);
+    const at = this.libraryTarget;
+    this.libraryTarget = null;
+    this.hideGuides();
+    if (!at) return false;
+    if (payload.kind === 'asset') {
+      void placeLibraryAsset(payload.ref, at.trackId, at.start);
+      return true;
+    }
+    const result = payload.result;
+    void importResultToTimeline(result, at).then((res) => {
+      if (!res.ok && res.reason !== 'cancelled') store.toast('warn', res.reason ?? 'Import failed.');
+      else if (res.ok) store.toast('info', `Added “${result.title}”.`, 2500);
+    });
+    return true;
+  }
+
+  // ---- razor ----
+  private razorLast: PointerEvent | null = null;
+  private razorShift = false;
+
+  /** Where a razor click at `clientX` on a clip would cut. */
+  private razorTime(body: HTMLElement, clientX: number, clipId: string, bypass: boolean): number {
+    return this.snapAt(this.timeAt(body, clientX), { exclude: clipId, bypass }).time;
+  }
+
+  /**
+   * With the razor, a line follows the pointer across the clip under it —
+   * across every lane when Shift is held — so you can see the cut before you
+   * make it.
+   */
+  private razorHover(e: PointerEvent | null, shift?: boolean): void {
+    if (e) this.razorLast = e;
+    this.razorShift = shift ?? e?.shiftKey ?? this.razorShift;
+    const ev = this.razorLast;
+    const guide = this.razorGuide;
+    if (!guide || !ev || store.get().ui.tool !== 'split' || ev.buttons & 1) return this.hideRazor();
+    const clipEl = (ev.target as HTMLElement | null)?.closest?.<HTMLElement>('.clip:not(.pending)');
+    const body = clipEl?.parentElement;
+    const lane = body?.parentElement;
+    if (!clipEl || !body || !lane?.isConnected) return this.hideRazor();
+    const t = this.razorTime(body, ev.clientX, clipEl.dataset.clip!, ev.metaKey || ev.ctrlKey);
+    guide.hidden = false;
+    guide.classList.toggle('all', this.razorShift);
+    guide.style.left = `${(HEAD_W + t * this.effPps(store.get())).toFixed(1)}px`;
+    guide.style.top = this.razorShift ? '0px' : `${lane.offsetTop + 7}px`;
+    guide.style.height = this.razorShift ? `${this.lanesInner.scrollHeight}px` : `${lane.offsetHeight - 14}px`;
+    (guide.firstChild as HTMLElement).textContent = `${this.razorShift ? 'Cut all · ' : ''}${timecode(t)}`;
+  }
+
+  private hideRazor(): void {
+    if (this.razorGuide) this.razorGuide.hidden = true;
+  }
+
+  // ---- clip gestures ----
+  private onClipDown(e: PointerEvent, track: Track, clip: Clip): void {
+    if (e.button !== 0) return;
     e.stopPropagation();
     e.preventDefault(); // stop the browser starting a native text/image drag
-    store.patchUi({ selection: { trackId: track.id, clipId: clip.id } });
-
     const tool = store.get().ui.tool;
-    const edge = (e.target as HTMLElement).dataset.edge as 'start' | 'end' | undefined;
-    const dur = store.get().project.duration;
-    const pxPerSec = bodyW / dur;
-    const startX = e.clientX;
-    const originStart = clip.start;
+    const clipEl = e.currentTarget as HTMLElement;
+    const body = clipEl.parentElement as HTMLElement;
 
     if (tool === 'split') {
-      transport.seek(originStart + clip.duration / 2);
-      splitClipAtPlayhead();
+      const at = this.razorTime(body, e.clientX, clip.id, e.metaKey || e.ctrlKey);
+      this.hideRazor();
+      if (e.shiftKey) splitAllAt(at);
+      else splitClipAt(track.id, clip.id, at);
       return;
     }
 
+    store.patchUi({ selection: { trackId: track.id, clipId: clip.id } });
+
+    const edge = (e.target as HTMLElement).dataset.edge as 'start' | 'end' | undefined;
     const mode: 'move' | 'trim-start' | 'trim-end' | 'loop' =
       tool === 'loop'
         ? 'loop'
@@ -832,62 +1148,156 @@ export class Timeline {
               ? 'trim-end'
               : 'move';
 
+    const originStart = clip.start;
     const originSpan = loopSpan(clip);
     const originOffset = clip.sourceOffset;
+    const looping = !!clip.loop?.enabled && clip.loop.count > 1;
     // How far each edge can travel: into the asset at the head, and up to the
     // asset's end at the tail. Matches the clamps in edits.trimClip, so the
     // preview cannot promise a trim the commit will refuse.
     const assetDuration = assetStore.peek(clip.assetId)?.buffer.duration ?? originOffset + clip.duration;
-    const clipEl = e.currentTarget as HTMLElement;
-    const pct = (seconds: number) => `${((seconds / dur) * 100).toFixed(3)}%`;
+    const downT = this.timeAt(body, e.clientX);
+    const trackName = (id: string) => store.get().project.tracks.find((t) => t.id === id)?.name ?? 'track';
 
-    const move = (ev: PointerEvent) => {
-      const dxSec = (ev.clientX - startX) / pxPerSec;
-      const moved = Math.abs(ev.clientX - startX) >= 3;
-      if (moved) clipEl.classList.add('dragging');
+    let dragging = false;
+    let last = { x: e.clientX, y: e.clientY };
+    // Modifiers are tracked apart from the pointer: pressing or releasing
+    // Option mid-drag has to flip move/copy without the mouse moving.
+    const mods = { copy: e.altKey, bypass: e.metaKey || e.ctrlKey };
+    let commit: (() => void) | null = null;
+    let raf = 0;
+
+    const update = () => {
+      if (!dragging) {
+        if (Math.abs(last.x - e.clientX) < DRAG_THRESHOLD && Math.abs(last.y - e.clientY) < DRAG_THRESHOLD) return;
+        dragging = true;
+        clipEl.classList.add('drag-src');
+        this.el.classList.add('tl-dragging');
+      }
+      const dxSec = this.timeAt(body, last.x) - downT;
 
       if (mode === 'move') {
-        clipEl.style.left = pct(this.snap(originStart + dxSec));
+        const copy = mods.copy && tool !== 'crossfade';
+        // The crossfade tool works within one track; select moves between them.
+        const target =
+          tool === 'crossfade'
+            ? { trackId: track.id, body, lane: body.parentElement as HTMLElement }
+            : this.laneAt(last.y, true)!;
+        const snapped = this.snapAt(originStart + dxSec, {
+          offsets: [0, originSpan],
+          exclude: copy ? undefined : clip.id,
+          grid: true,
+          bypass: mods.bypass,
+        });
+        const at = snapped.time;
+        const elsewhere = target.trackId !== track.id;
+        this.showGhost(
+          target.body,
+          at,
+          originSpan,
+          `${copy ? '+ Copy  ·  ' : ''}${timecode(at)}${elsewhere ? `  →  ${trackName(target.trackId)}` : ''}`,
+          copy ? 'copy' : 'move',
+        );
+        this.showSnapLine(snapped.line);
+        this.highlightLane(elsewhere ? target.lane : null);
+        this.el.classList.toggle('tl-copying', copy);
+        if (copy) commit = () => duplicateClipTo(track.id, clip.id, at, target.trackId);
+        else if (at === originStart && !elsewhere) commit = null;
+        else if (tool === 'crossfade') commit = () => moveClipWithCrossfade(track.id, clip.id, at);
+        else commit = () => moveClip(track.id, clip.id, at, target.trackId);
       } else if (mode === 'loop') {
-        const targetSpan = Math.max(clip.duration, originSpan + dxSec);
-        const count = loopCountForSpan(clip.duration, clip.loop?.crossfade ?? 0.05, targetSpan);
-        const snappedSpan = count === 1 ? clip.duration : clip.duration + (count - 1) * (clip.duration - (clip.loop?.crossfade ?? 0.05));
-        clipEl.style.width = pct(snappedSpan);
+        const xfade = clip.loop?.crossfade ?? 0.05;
+        const wanted = Math.max(clip.duration, originSpan + dxSec);
+        const count = loopCountForSpan(clip.duration, xfade, wanted);
+        const span = count === 1 ? clip.duration : clip.duration + (count - 1) * (clip.duration - xfade);
+        this.showGhost(body, originStart, span, `× ${count}  ·  ${span.toFixed(1)} s`, 'trim');
+        commit = count === (clip.loop?.enabled ? clip.loop.count : 1) ? null : () => dragLoopClip(track.id, clip.id, wanted);
       } else if (mode === 'trim-start') {
-        // Trimming used to show nothing at all until the pointer came up.
-        const d = Math.max(-originOffset, Math.min(dxSec, clip.duration - 0.05));
-        clipEl.style.left = pct(originStart + d);
-        clipEl.style.width = pct(clip.duration - d);
+        const snapped = this.snapAt(originStart + dxSec, { exclude: clip.id, bypass: mods.bypass || looping });
+        const d = Math.max(-originOffset, Math.min(snapped.time - originStart, clip.duration - 0.05));
+        const newDur = clip.duration - d;
+        const atLimit = d <= -originOffset + 1e-6;
+        this.showGhost(
+          body,
+          originStart + d,
+          loopSpan({ ...clip, duration: newDur }),
+          `${timecode(originStart + d)}  ·  ${newDur.toFixed(2)} s${atLimit ? '  ·  start of recording' : ''}`,
+          `trim${atLimit ? ' limit' : ''}`,
+        );
+        this.showSnapLine(Math.abs(originStart + d - snapped.time) < 1e-6 ? snapped.line : null);
+        commit = Math.abs(d) < 1e-6 ? null : () => trimClip(track.id, clip.id, 'start', d);
       } else {
+        const originEnd = originStart + clip.duration;
+        const snapped = this.snapAt(originEnd + dxSec, { exclude: clip.id, bypass: mods.bypass || looping });
         const room = assetDuration - (originOffset + clip.duration);
-        const d = Math.max(-(clip.duration - 0.05), Math.min(dxSec, room));
-        clipEl.style.width = pct(clip.duration + d);
+        const d = Math.max(-(clip.duration - 0.05), Math.min(snapped.time - originEnd, room));
+        const newDur = clip.duration + d;
+        const atLimit = d >= room - 1e-6;
+        this.showGhost(
+          body,
+          originStart,
+          loopSpan({ ...clip, duration: newDur }),
+          `${newDur.toFixed(2)} s${atLimit ? '  ·  end of recording' : ''}`,
+          `trim${atLimit ? ' limit' : ''}`,
+        );
+        this.showSnapLine(Math.abs(originEnd + d - snapped.time) < 1e-6 ? snapped.line : null);
+        commit = Math.abs(d) < 1e-6 ? null : () => trimClip(track.id, clip.id, 'end', d);
       }
     };
-    const up = (ev: PointerEvent) => {
+
+    const frame = () => {
+      if (dragging && this.edgeScroll(last.x)) update();
+      raf = requestAnimationFrame(frame);
+    };
+    const move = (ev: PointerEvent) => {
+      last = { x: ev.clientX, y: ev.clientY };
+      mods.copy = ev.altKey;
+      mods.bypass = ev.metaKey || ev.ctrlKey;
+      update();
+    };
+    const key = (ev: KeyboardEvent) => {
+      if (ev.key === 'Escape') {
+        // Throw the gesture away; don't also let Escape clear the selection.
+        ev.preventDefault();
+        ev.stopImmediatePropagation();
+        commit = null;
+        finish();
+        return;
+      }
+      mods.copy = ev.altKey;
+      mods.bypass = ev.metaKey || ev.ctrlKey;
+      if (dragging) update();
+    };
+    const finish = () => {
       window.removeEventListener('pointermove', move);
       window.removeEventListener('pointerup', up);
-      clipEl.classList.remove('dragging');
-      const dxSec = (ev.clientX - startX) / pxPerSec;
-      if (Math.abs(ev.clientX - startX) < 3) {
-        if (mode === 'move') return; // pure click, nothing to do
-        if (mode === 'loop') return; // too small a drag to count as looping
-      }
-      if (mode === 'move' && tool === 'crossfade') {
-        moveClipWithCrossfade(track.id, clip.id, this.snap(originStart + dxSec));
-      } else if (mode === 'move') {
-        // possible cross-track move
-        const overLane = document.elementFromPoint(ev.clientX, ev.clientY)?.closest('.lane') as HTMLElement | null;
-        const targetTrackId = overLane?.dataset.track ?? track.id;
-        moveClip(track.id, clip.id, this.snap(originStart + dxSec), targetTrackId);
-      } else if (mode === 'loop') {
-        dragLoopClip(track.id, clip.id, originSpan + dxSec);
-      } else {
-        trimClip(track.id, clip.id, mode === 'trim-start' ? 'start' : 'end', dxSec);
-      }
+      window.removeEventListener('pointercancel', cancel);
+      window.removeEventListener('keydown', key, true);
+      window.removeEventListener('keyup', key, true);
+      cancelAnimationFrame(raf);
+      clipEl.classList.remove('drag-src');
+      this.el.classList.remove('tl-dragging', 'tl-copying');
+      this.hideGuides();
+    };
+    const up = (ev: PointerEvent) => {
+      last = { x: ev.clientX, y: ev.clientY };
+      mods.copy = ev.altKey;
+      mods.bypass = ev.metaKey || ev.ctrlKey;
+      if (dragging) update();
+      const run = dragging ? commit : null;
+      finish();
+      run?.();
+    };
+    const cancel = () => {
+      commit = null;
+      finish();
     };
     window.addEventListener('pointermove', move);
     window.addEventListener('pointerup', up);
+    window.addEventListener('pointercancel', cancel);
+    window.addEventListener('keydown', key, true);
+    window.addEventListener('keyup', key, true);
+    raf = requestAnimationFrame(frame);
   }
 
   private nearLeft(e: PointerEvent): boolean {

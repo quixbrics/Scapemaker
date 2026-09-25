@@ -32,13 +32,15 @@ No UI framework. A small number of long-lived panels driven by a central store.
 | Store / history | `src/state/store.ts`, `history.ts`, `edits.ts`, `effectEdits.ts` | Subscribe/emit store; every timeline edit is an undoable command. |
 | Asset store | `src/audio/assetStore.ts` | **One decoded `AudioBuffer` per source asset.** Clips are non-owning views. Liveness is derived from the project (`retain`), not ref-counted — undo/redo move clips in and out without any acquire/release pair. Idle assets are kept until the memory is wanted, then swept oldest-first past 80% of budget; a live asset is never evicted, so a full budget is reported, not papered over. Originals cached in IndexedDB; decoded buffers never are. |
 | Peaks | `src/audio/peaks.ts` | Multi-resolution `Int8Array` pyramid. Waveforms are **never** painted from raw samples. |
-| Graph | `src/audio/graph.ts` | One builder for live playback **and** the offline render, so the two cannot diverge. |
+| Graph | `src/audio/graph.ts` | One builder for live playback **and** the offline render, so the two cannot diverge. Each clip runs fade envelope → level → pan, so clip gain and pan move live without fighting a scheduled fade. |
 | Automation | `src/audio/automation.ts` | Linear / smooth / bezier. Bezier is sampled to a `Float32Array`; the **same** sampler runs live and offline. `tests/render-null.test.ts` guards it. |
 | Effects | `src/audio/effects/eq.ts`, `reverb.ts` | 5-band biquad EQ; reverb from **runtime-synthesised** impulse responses (no shipped IR files). |
 | Render / export | `src/audio/render.ts`, `wav.ts`, `src/export/*` | `OfflineAudioContext` mixdown + stems, hand-written WAV encoder, sources CSV, reflection markdown. Everything leaves as ONE `.zip` (`export/zip.ts`, store-only, no dependency) — eleven separate downloads hit Chrome's multi-download prompt. A stem is the track alone: it ignores mute/solo and the master trim. |
 | Storage | `src/audio/storage.ts` | Asks for persistent storage at boot. A project file holds no audio and a local recording has no URL to re-fetch from, so the IndexedDB cache is the only copy; if the browser will not promise to keep it, the student is told once. |
 | Sources | `src/sources/*` | `SoundResult` is the shared shape all four sources normalise to. `local.ts` is the primary path. `aporee.ts` searches the Archive mirror with an absolute-value bounding box + a signed haversine (see the note on `absRanges` in `geo.ts`). |
 | Licence | `src/licence/model.ts`, `warnings.ts` | Parse → classify → badge / warn / allow. NonCommercial and NoDerivatives warn at import; the decision is recorded; export repeats the notice and lists the specific assets. |
+| Timeline gestures | `src/ui/timeline.ts`, `dnd.ts` | Every move, trim, loop and library drop draws a **ghost** where the clip will land (with a time/length readout) and leaves the original in place until release; Esc cancels. Snap is magnetic to clip edges and the playhead, then the grid. Library drags are pointer events, not native drag-and-drop — see the note at the top of `dnd.ts` for why. |
+| Layout | `src/ui/panels.ts` | Side panels resize from their inner edge and fold to a rail; widths are a per-machine preference in localStorage, never in the project file. |
 | UI | `src/ui/*` | Canvas timeline lanes, one delegated tooltip controller, dark default with an explicit light choice. Every colour is a token in `src/styles/tokens.css` — defined nowhere else. `h()` derives `aria-label` from a control's tooltip title, so icon-only buttons are named. |
 | Project files | `src/state/persist.ts`, `fileHandle.ts` | Save writes back to the file that was opened (File System Access API), falling back to a download. Shift-click or Cmd/Ctrl+Shift+S saves a copy. |
 
@@ -52,7 +54,26 @@ No UI framework. A small number of long-lived panels driven by a central store.
 6. All editing is non-destructive.
 7. Playback and export apply every sound-affecting parameter with the same code.
 8. A gesture is one undo step, and redo lands where the gesture ended.
-9. Basic mode really is smaller: select/trim/split, no automation, no EQ or reverb.
+9. Basic mode really is smaller: select/trim/razor, no automation, no EQ or reverb.
+
+## Editing
+
+Shortcuts follow Premiere Pro / Audition where there is an equivalent; press
+**?** in the app for the full sheet. The ones worth knowing first:
+
+| | |
+|---|---|
+| V / C / T | Select / razor / trim |
+| Option/Alt + drag | Copy a clip (to any track) instead of moving it |
+| Cmd/Ctrl + drag | Ignore snap for this drag |
+| Shift + razor click, Cmd/Ctrl + Shift + K | Cut every track at once |
+| Option/Alt + scroll, = / −, \\ | Zoom around the pointer / in / out / fit |
+| ↑ ↓ | Previous / next clip edge |
+| ` | Fold both side panels — timeline only |
+
+**Auto** on the master strip measures the whole mix and sets the master so the
+loudest moment peaks at −1 dB. It raises a quiet mix as well as lowering a
+clipping one, and it is one undo step.
 
 ## Known gaps
 

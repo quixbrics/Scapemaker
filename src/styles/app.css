@@ -87,8 +87,8 @@
   display: flex; gap: 10px; padding: 9px 8px; align-items: center; cursor: pointer;
   border-left: 2px solid transparent;
 }
-.result[draggable='true'] { cursor: grab; }
-.result[draggable='true']:active { cursor: grabbing; }
+.result[data-draggable='true'] { cursor: grab; }
+.result[data-draggable='true']:active { cursor: grabbing; }
 .result:hover { background: var(--line-soft); }
 .result.sel { background: var(--row-sel); border-left-color: var(--accent); }
 .result .play-sq {
@@ -184,8 +184,10 @@
   width: 178px; flex: 0 0 178px; border-right: 1px solid var(--line); padding: 9px 12px;
   display: flex; flex-direction: column; justify-content: space-between;
   border-left: 2px solid var(--track-hue, var(--text-muted));
-  /* stays put while the time content scrolls horizontally underneath it */
-  position: sticky; left: 0; z-index: 6; background: var(--bg);
+  /* stays put while the time content scrolls horizontally underneath it —
+     and above everything drawn across the lanes (playhead, ghost, snap and
+     razor lines), which otherwise slid over the track names when scrolled */
+  position: sticky; left: 0; z-index: 14; background: var(--bg);
 }
 .lane.sel-track .lane-head { background: var(--panel); }
 .lane-head .h-top { display: flex; align-items: baseline; gap: 8px; }
@@ -216,7 +218,10 @@
   border: 1px solid var(--clip-border, var(--border)); background: var(--clip-bg, transparent);
 }
 .clip.sel { outline: 2px solid var(--accent); outline-offset: -1px; z-index: 3; }
-.clip.dragging { opacity: .45; outline: 1px dashed var(--accent); outline-offset: -1px; z-index: 10; cursor: grabbing; }
+/* The clip being dragged stays where it was, faded, while its ghost shows
+   where it is going. */
+.clip.drag-src { opacity: .35; }
+.tl-copying .clip.drag-src { opacity: .8; }
 .clip.pending {
   cursor: default; background: var(--inset); border-style: dashed;
   display: flex; flex-direction: column; justify-content: flex-end; gap: 4px; padding-bottom: 5px;
@@ -288,12 +293,20 @@
 .auto-handle:hover { outline: 2px solid var(--accent-border); }
 
 /* ---------- master strip (106px) ---------- */
-.master { height: 106px; flex: 0 0 106px; border-top: 1px solid var(--line); background: var(--panel); display: flex; }
+.master { height: 122px; flex: 0 0 122px; border-top: 1px solid var(--line); background: var(--panel); display: flex; }
 .master-head {
   width: 178px; flex: 0 0 178px; border-right: 1px solid var(--line); padding: 11px 12px;
-  display: flex; flex-direction: column; gap: 7px;
+  display: flex; flex-direction: column; gap: 6px;
 }
-.master-head .m-row { display: flex; justify-content: space-between; }
+.master-head .m-row { display: flex; justify-content: space-between; align-items: center; }
+.master-head .m-title { margin-bottom: 1px; }
+.auto-level {
+  font-family: var(--font-mono); font-size: 9.5px; letter-spacing: .3px; padding: 2px 7px;
+  border: 1px solid var(--border-strong); border-radius: 3px; color: var(--text-2);
+}
+.auto-level:hover { border-color: var(--accent-border); color: var(--accent); }
+.auto-level.urgent { border-color: var(--danger-border); color: var(--danger); background: var(--danger-bg); }
+.auto-level:disabled { opacity: .6; cursor: progress; }
 .master-head .m-row span:first-child { font-size: 11px; color: var(--text-muted); }
 .master-head .m-row .m-val { font-family: var(--font-mono); font-size: 10.5px; color: var(--text-2); }
 .master-head .m-val.warn { color: var(--warn); }
@@ -436,4 +449,94 @@
 .remember-row {
   display: flex; align-items: center; gap: 7px; margin-top: 9px;
   font-size: 11.5px; color: var(--text-2); cursor: pointer;
+}
+
+/* ---------- drag feedback: ghost clip, snap line, razor (timeline.ts) ---------- */
+.clip-ghost {
+  position: absolute; top: 7px; bottom: 7px; z-index: 9; pointer-events: none;
+  border: 1.5px dashed var(--accent); background: color-mix(in srgb, var(--accent) 12%, transparent);
+  box-sizing: border-box; min-width: 2px;
+}
+.clip-ghost.copy { border-style: solid; background: color-mix(in srgb, var(--accent) 20%, transparent); }
+.clip-ghost.trim { border-color: var(--text-strong); background: color-mix(in srgb, var(--text-strong) 7%, transparent); }
+.clip-ghost.limit { border-color: var(--warn); }
+.clip-ghost.drop { border-style: solid; }
+.ghost-label {
+  position: absolute; left: 0; top: 0; padding: 1px 6px; white-space: nowrap;
+  font-family: var(--font-mono); font-size: 9.5px; color: var(--accent-ink); background: var(--accent);
+}
+.clip-ghost.trim .ghost-label { color: var(--bg); background: var(--text-strong); }
+.clip-ghost.limit .ghost-label { color: var(--bg); background: var(--warn); }
+
+.snap-line {
+  position: absolute; top: 0; bottom: 0; width: 1px; margin-left: -.5px; z-index: 11; pointer-events: none;
+  background: var(--warn); box-shadow: 0 0 0 1px color-mix(in srgb, var(--warn) 30%, transparent);
+}
+.lane.drop-target .lane-body { background: color-mix(in srgb, var(--accent) 6%, transparent); }
+.lane.drop-target .lane-head { box-shadow: inset -2px 0 0 var(--accent); }
+
+.razor-guide {
+  position: absolute; width: 0; z-index: 11; pointer-events: none;
+  border-left: 1.5px solid var(--danger);
+}
+.razor-guide.all { border-left-style: dashed; }
+.razor-label {
+  position: absolute; left: 4px; top: 0; padding: 1px 5px; white-space: nowrap;
+  font-family: var(--font-mono); font-size: 9.5px; color: var(--bg); background: var(--danger);
+}
+.centre[data-tool='split'] .clip { cursor: crosshair; }
+.centre[data-tool='trim'] .clip { cursor: ew-resize; }
+.tl-dragging, .tl-dragging .clip { cursor: grabbing; }
+.tl-copying, .tl-copying .clip { cursor: copy; }
+
+/* the chip that follows the pointer while dragging from the library (dnd.ts) */
+.drag-chip {
+  position: fixed; left: 0; top: 0; z-index: 700; pointer-events: none;
+  display: flex; gap: 8px; align-items: center; max-width: 260px; padding: 4px 9px;
+  border: 1px solid var(--border-strong); border-radius: 3px; background: var(--panel);
+  box-shadow: var(--tip-shadow, 0 8px 22px rgba(0,0,0,.4)); font-size: 11px; color: var(--text-2);
+}
+.drag-chip .dc-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.drag-chip .dc-dur { font-family: var(--font-mono); font-size: 9.5px; color: var(--text-faint); }
+.drag-chip.over { border-color: var(--accent-border); opacity: .75; }
+body.library-dragging, body.library-dragging * { cursor: grabbing !important; }
+
+/* ---------- resizable, foldable side panels (panels.ts) ---------- */
+.side-panel { position: relative; }
+.panel-fold {
+  position: absolute; top: 9px; right: 8px; z-index: 5; width: 22px; height: 22px;
+  display: flex; align-items: center; justify-content: center; border-radius: 3px; color: var(--text-faint);
+}
+.panel-fold:hover { color: var(--text-strong); background: var(--raised); }
+.panel-rail { display: none; }
+.side-panel.collapsed { overflow: hidden; }
+.side-panel.collapsed > :not(.panel-rail):not(.panel-resizer) { display: none; }
+.side-panel.collapsed .panel-rail {
+  display: flex; flex-direction: column; align-items: center; gap: 12px; padding-top: 12px;
+  width: 100%; height: 100%; color: var(--text-muted);
+}
+.panel-rail:hover { color: var(--text-strong); background: var(--line-soft); }
+.rail-label { writing-mode: vertical-rl; font-size: 11px; letter-spacing: .4px; }
+.panel-left.collapsed .rail-label { transform: rotate(180deg); }
+.panel-resizer { position: absolute; top: 0; bottom: 0; width: 7px; z-index: 20; cursor: col-resize; }
+.panel-resizer.left { right: -4px; }
+.panel-resizer.right { left: -4px; }
+.panel-resizer:hover, body.col-resizing .panel-resizer:hover { background: linear-gradient(90deg, transparent 3px, var(--accent) 3px, var(--accent) 4px, transparent 4px); }
+body.col-resizing, body.col-resizing * { cursor: col-resize !important; user-select: none; }
+
+/* ---------- inspector extras ---------- */
+.automate-links { display: flex; align-items: center; gap: 12px; font-size: 11px; }
+.automate-links .k { color: var(--text-faint); margin-right: auto; }
+.automate-links .linkish.on { color: var(--accent); }
+
+/* ---------- keyboard sheet (dialogs/shortcuts.ts) ---------- */
+.kbd-btn { font-family: var(--font-mono); font-size: 12px; }
+.shortcut-sheet { max-width: 640px; }
+.shortcut-sheet h4 { margin: 16px 0 6px; font-size: 11px; color: var(--text-faint); font-weight: 500; letter-spacing: .5px; text-transform: uppercase; }
+.shortcut-sheet dl { display: grid; grid-template-columns: max-content 1fr; gap: 5px 16px; margin: 0; font-size: 12px; }
+.shortcut-sheet dt { margin: 0; }
+.shortcut-sheet dd { margin: 0; color: var(--text-2); }
+.shortcut-sheet kbd {
+  font-family: var(--font-mono); font-size: 10.5px; padding: 1px 6px; border: 1px solid var(--border-strong);
+  border-radius: 3px; background: var(--inset); color: var(--text-strong); white-space: nowrap;
 }

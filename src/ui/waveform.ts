@@ -15,6 +15,8 @@ export interface WaveformStyle {
   strokeAlpha: number;
 }
 
+const MAX_CANVAS_PX = 16_384;
+
 const envScratch = new Map<number, Float32Array>();
 function scratch(width: number): Float32Array {
   let a = envScratch.get(width);
@@ -52,7 +54,10 @@ export function drawWaveform(
   style: WaveformStyle,
 ): void {
   const dpr = Math.min(window.devicePixelRatio || 1, 2);
-  const cssW = canvas.clientWidth || 1;
+  // A canvas wider than the browser's limit (~32k px) silently draws nothing.
+  // Zoomed right in on a long clip the element can be far wider than that,
+  // so draw at most MAX_CANVAS_PX and let CSS stretch it.
+  const cssW = Math.min(canvas.clientWidth || 1, MAX_CANVAS_PX / dpr);
   const cssH = canvas.clientHeight || 1;
   const w = Math.max(1, Math.floor(cssW * dpr));
   const hgt = Math.max(1, Math.floor(cssH * dpr));

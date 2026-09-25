@@ -4,8 +4,9 @@
  * parameter that affects sound is applied HERE, once, so playback and export
  * cannot diverge.
  *
- * Per track:  clip sources → clip gain (fades) → track gain → EQ → panner
- *             → reverb (wet/dry) → master
+ * Per clip:   source → fade envelope → clip level → clip pan ─┐
+ * Per track:  (clips) → track gain → mute → EQ → panner → reverb (wet/dry)
+ *             → master
  * Master:     sum → master gain → [analyser] → destination
  */
 
@@ -56,7 +57,15 @@ export interface LiveGraph {
   analyser: AnalyserNode | null;
   sources: AudioBufferSourceNode[];
   trackChains: Map<string, TrackChain>;
+  /** per clip id — the static level and pan, patched live by updateLiveMix */
+  clipChains: Map<string, ClipChain>;
   stop(): void;
+}
+
+export interface ClipChain {
+  /** clip gain in dB, kept apart from the fade envelope so it can move live */
+  level: GainNode;
+  panner: StereoPannerNode;
 }
 
 export interface TrackChain {
@@ -99,6 +108,7 @@ export function buildGraph(
   const anySolo = project.tracks.some((t) => t.solo);
   const sources: AudioBufferSourceNode[] = [];
   const trackChains = new Map<string, TrackChain>();
+  const clipChains = new Map<string, ClipChain>();
 
   for (const track of project.tracks) {
     if (opts.onlyTrackId && track.id !== opts.onlyTrackId) continue;
@@ -151,7 +161,13 @@ export function buildGraph(
     for (const clip of track.clips) {
       const buffer = resolve(clip.assetId);
       if (!buffer) continue;
-      scheduleClip(ctx, clip, buffer, headNode, sources, opts);
+      const level = ctx.createGain();
+      level.gain.value = dbToGain(clip.gain);
+      const clipPan = ctx.createStereoPanner();
+      clipPan.pan.value = clampPan(clip.pan ?? 0);
+      level.connect(clipPan).connect(headNode);
+      clipChains.set(clip.id, { level, panner: clipPan });
+      scheduleClip(ctx, clip, buffer, level, sources, opts);
     }
   }
 
@@ -165,7 +181,7 @@ export function buildGraph(
     }
   };
 
-  return { master, analyser, sources, trackChains, stop };
+  return { master, analyser, sources, trackChains, clipChains, stop };
 }
 
 /**
@@ -215,7 +231,18 @@ export function updateLiveMix(graph: LiveGraph, project: Project): void {
     if (track.reverb && !automated('reverb.wet')) {
       chain.reverbWet.gain.setTargetAtTime(track.reverb.enabled ? track.reverb.wet : 0, now, ramp);
     }
+
+    for (const clip of track.clips) {
+      const cc = graph.clipChains.get(clip.id);
+      if (!cc) continue;
+      cc.level.gain.setTargetAtTime(dbToGain(clip.gain), now, ramp);
+      cc.panner.pan.setTargetAtTime(clampPan(clip.pan ?? 0), now, ramp);
+    }
   }
+}
+
+function clampPan(v: number): number {
+  return Math.max(-1, Math.min(1, v));
 }
 
 const EQ_PARAM_BY_INDEX = ['eq.low', 'eq.lowMid', 'eq.mid', 'eq.highMid', 'eq.high'];
@@ -278,8 +305,9 @@ function scheduleClip(
     const when = opts.timeOrigin + audibleStart;
     const offset = clip.sourceOffset + into;
 
-    // Clip gain + fades, all in linear gain.
-    const base = dbToGain(clip.gain);
+    // The fade envelope only: 0..1. Clip gain lives on the level node after
+    // it, so it can change live without fighting a scheduled fade curve.
+    const base = 1;
     const fi = clip.fadeIn.duration;
     const fo = clip.fadeOut.duration;
     g.gain.setValueAtTime(fi > into ? 0 : base, when);

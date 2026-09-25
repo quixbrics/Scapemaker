@@ -83,6 +83,8 @@ export interface Clip {
   sourceOffset: number; // offset into the asset, seconds
   duration: number; // played length, seconds
   gain: number; // dB
+  /** -1 (left) .. 1 (right), applied before the track's own pan. Optional: older files have none. */
+  pan?: number;
   fadeIn: Fade;
   fadeOut: Fade;
   loop?: ClipLoop;
@@ -268,6 +270,7 @@ export function makeClip(assetId: AssetId, start: number, duration: number): Cli
     sourceOffset: 0,
     duration,
     gain: 0,
+    pan: 0,
     fadeIn: { duration: 0, curve: 'equalPower' },
     fadeOut: { duration: 0, curve: 'equalPower' },
   };
@@ -327,6 +330,7 @@ export function migrate(raw: unknown): MigrationResult {
     for (const clip of track.clips ?? []) {
       clip.fadeIn ??= { duration: 0, curve: 'equalPower' };
       clip.fadeOut ??= { duration: 0, curve: 'equalPower' };
+      clip.pan ??= 0;
     }
   }
   project.reflection ??= emptyReflection();

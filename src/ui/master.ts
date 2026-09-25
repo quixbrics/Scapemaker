@@ -11,11 +11,11 @@ import { transport } from '../audio/transport';
 import { renderProject } from '../audio/render';
 import { analyseBuffer, readLiveMeter, type BufferAnalysis } from '../audio/analysis';
 import { drawMasterWaveform } from './waveform';
-import { clear, h, timecode, fmtDb } from './dom';
+import { h, timecode, fmtDb } from './dom';
 import { tt } from './tooltip';
 import { tokenAlpha } from './theme';
 import { contentEnd } from '../state/project';
-import { setMasterGain } from '../state/edits';
+import { setMasterGain, applyMasterGain, autoLevelMaster, AUTO_LEVEL_TARGET_DB } from '../state/edits';
 
 const HEAD_W = 178;
 /** Long enough that a run of small edits analyses once, short enough to feel live. */
@@ -53,6 +53,7 @@ export class MasterStrip {
     this.canvas = h('canvas') as HTMLCanvasElement;
     this.bodyEl.append(this.canvas);
     this.el.append(this.headEl, this.bodyEl);
+    this.buildHead();
     this.renderHead(-Infinity, -Infinity, null);
     store.subscribe((_s, changed) => {
       if (changed.has('project')) {
@@ -282,14 +283,37 @@ export class MasterStrip {
     if (this.faderReadout) this.faderReadout.textContent = fmtDb(db);
   }
 
-  private renderHead(peakDb: number, rmsDb: number, lufs: number | null): void {
-    clear(this.headEl);
-    const peakCls = peakDb >= 0 ? 'danger' : peakDb >= -3 ? 'warn' : '';
-    const fmt = (v: number, unit: string) => (isFinite(v) ? `${v >= 0 ? '+' : '−'}${Math.abs(v).toFixed(1)} ${unit}` : `—`);
+  private peakEl!: HTMLElement;
+  private rmsEl!: HTMLElement;
+  private lufsEl!: HTMLElement;
+  private autoBtn!: HTMLButtonElement;
+
+  /**
+   * Built once. The head used to be torn down and rebuilt on every animation
+   * frame during playback just to change three numbers — and it had grown
+   * taller than the strip, which pushed the master fader off the bottom of
+   * the window, so there appeared to be no master control at all.
+   */
+  private buildHead(): void {
+    this.peakEl = h('span', { class: 'm-val mono' });
+    this.rmsEl = h('span', { class: 'm-val mono' });
+    this.lufsEl = h('span', { class: 'm-val mono' });
+    this.autoBtn = h(
+      'button',
+      {
+        class: 'auto-level',
+        ...tt(
+          'Auto-level',
+          `Sets the master so the loudest moment of the mix peaks at ${AUTO_LEVEL_TARGET_DB} dB — clear of clipping. Undoable.`,
+        ),
+        onclick: () => void this.autoLevel(),
+      },
+      'Auto',
+    ) as HTMLButtonElement;
     this.headEl.append(
-      h('span', { class: 'section-label' }, 'MASTER'),
-      row('Peak', fmt(peakDb, 'dB'), peakCls),
-      row('RMS', fmt(rmsDb, 'dB'), ''),
+      h('div', { class: 'm-row m-title' }, h('span', { class: 'section-label' }, 'MASTER'), this.autoBtn),
+      h('div', { class: 'm-row' }, h('span', {}, 'Peak'), this.peakEl),
+      h('div', { class: 'm-row' }, h('span', {}, 'RMS'), this.rmsEl),
       h(
         'div',
         {
@@ -297,11 +321,70 @@ export class MasterStrip {
           ...tt('Integrated loudness', 'Average perceived loudness of the whole mix. Broadcast delivery is usually −23 LUFS.'),
         },
         h('span', {}, 'Integrated'),
-        h('span', { class: 'm-val mono' }, lufs == null ? '—' : `${lufs.toFixed(1)} LUFS`),
+        this.lufsEl,
       ),
       this.masterFader(),
     );
-    this.syncFader();
+  }
+
+  private renderHead(peakDb: number, rmsDb: number, lufs: number | null): void {
+    const fmt = (v: number, unit: string) => (isFinite(v) ? `${v >= 0 ? '+' : '−'}${Math.abs(v).toFixed(1)} ${unit}` : `—`);
+    this.peakEl.textContent = fmt(peakDb, 'dB');
+    this.peakEl.className = `m-val mono ${peakDb >= 0 ? 'danger' : peakDb >= -3 ? 'warn' : ''}`;
+    this.rmsEl.textContent = fmt(rmsDb, 'dB');
+    this.lufsEl.textContent = lufs == null ? '—' : `${lufs.toFixed(1)} LUFS`;
+    // Draw the eye to Auto while the mix is actually clipping.
+    this.autoBtn.classList.toggle('urgent', !!this.analysis?.clipped);
+  }
+
+  /**
+   * Measure the whole mix (now, if the last analysis is stale) and set the
+   * master so its peak lands at the target. The measurement already includes
+   * the current master setting, so the correction is a straight difference.
+   */
+  private async autoLevel(): Promise<void> {
+    const p = store.get().project;
+    if (contentEnd(p) < 0.1) {
+      store.toast('info', 'Nothing on the timeline to level yet.');
+      return;
+    }
+    let peakDb = this.analysis?.peakDb ?? -Infinity;
+    const sig = this.analysisSignature(p);
+    if (sig !== this.lastSig || !this.analysis) {
+      this.autoBtn.disabled = true;
+      this.autoBtn.textContent = '…';
+      try {
+        const buf = await renderProject(p, {});
+        this.analysis = analyseBuffer(buf);
+        this.lastSig = sig;
+        this.paintOffline(buf);
+        peakDb = this.analysis.peakDb;
+      } catch {
+        store.toast('error', 'Could not measure the mix.');
+        return;
+      } finally {
+        this.autoBtn.disabled = false;
+        this.autoBtn.textContent = 'Auto';
+      }
+    }
+    const current = p.masterGain ?? 0;
+    const next = autoLevelMaster(peakDb, current);
+    if (next == null) {
+      store.toast('info', 'The mix is silent — nothing to level.');
+      return;
+    }
+    if (Math.abs(next - current) < 0.05) {
+      store.toast('info', `Already peaking at ${AUTO_LEVEL_TARGET_DB} dB.`, 2200);
+      return;
+    }
+    applyMasterGain(next);
+    const limited = next <= -60 || next >= 6;
+    store.toast(
+      'info',
+      `Master ${fmtDb(current)} → ${fmtDb(next)} dB. ` +
+        (limited ? 'That is as far as the master goes — adjust the tracks too.' : `The loudest moment now peaks at ${AUTO_LEVEL_TARGET_DB} dB.`),
+      3800,
+    );
   }
 
   private loop(): void {
@@ -321,10 +404,6 @@ export class MasterStrip {
     };
     this.raf = requestAnimationFrame(step);
   }
-}
-
-function row(label: string, value: string, cls: string): HTMLElement {
-  return h('div', { class: 'm-row' }, h('span', {}, label), h('span', { class: `m-val mono ${cls}` }, value));
 }
 
 void HEAD_W;

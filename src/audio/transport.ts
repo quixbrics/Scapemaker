@@ -13,7 +13,7 @@ import { contentEnd, type Project } from '../state/project';
 /**
  * What the running graph's STRUCTURE depends on. If this changes mid-playback
  * the graph must be rebuilt; anything else (a fader, mute, solo, pan, EQ or
- * reverb value) can be patched onto the live nodes instead.
+ * reverb value, a clip's gain or pan) can be patched onto the live nodes instead.
  */
 function structuralSignature(project: Project): string {
   return JSON.stringify(

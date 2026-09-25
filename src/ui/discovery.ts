@@ -32,7 +32,7 @@ import { importResultToTimeline, placeLocalAsset } from '../sources/importResult
 import { importFiles, filesFromDataTransfer, FILE_PICKER_ACCEPT } from '../sources/local';
 import { assetStore } from '../audio/assetStore';
 import type { AssetRef } from '../state/project';
-import { ASSET_DND_TYPE, SEARCH_RESULT_DND_TYPE } from './dnd';
+import { beginLibraryDrag } from './dnd';
 
 const TABS: [DiscoveryTab, string][] = [
   ['freesound', 'Freesound'],
@@ -132,11 +132,21 @@ export class Discovery {
   }
 
   // ---- Mine (imported bin) ----
+  /** What the Mine list shows; anything else changing must not rebuild it. */
+  private mineSig = '';
+
   private renderMine(): void {
     const pane = this.panes.mine;
     if (!pane) return;
-    clear(pane);
     const refs = Object.values(store.get().project.assets);
+    // The project changes on every edit and every timeline scroll. Rebuilding
+    // the list each time threw away the row under the pointer mid-drag.
+    const sig = JSON.stringify(
+      refs.map((r) => [r.id, r.title, r.author, r.licence.id, r.duration, assetStore.peek(r.id)?.buffer.duration]),
+    );
+    if (sig === this.mineSig) return;
+    this.mineSig = sig;
+    clear(pane);
     if (refs.length === 0) {
       pane.append(
         h(
@@ -163,14 +173,26 @@ export class Discovery {
       'div',
       {
         class: 'result',
-        draggable: 'true',
-        ondragstart: (e) => {
-          (e as DragEvent).dataTransfer?.setData(ASSET_DND_TYPE, ref.id);
-        },
-        onclick: () => placeLocalAsset(ref),
-        ...tt('Add to timeline', 'Click to drop on the first empty track, or drag onto a lane.'),
+        'data-draggable': 'true',
+        // The row is for dragging only. It used to place the sound on a plain
+        // click too, so a drag that never got going landed the clip at the end
+        // of the first empty track instead of where it was aimed.
+        onpointerdown: (e) =>
+          beginLibraryDrag(e as PointerEvent, { kind: 'asset', ref, title: ref.title, duration: dur ?? 0 }),
+        ...tt('Drag onto a track', 'A ghost shows where it will land. Or press + to add it after everything else.'),
       },
-      h('div', { class: 'play-sq' }, svgIcon('c-plus', 10)),
+      h(
+        'button',
+        {
+          class: 'play-sq',
+          ...tt('Add to timeline', 'Places it after the last clip, on the first empty track.'),
+          onclick: (e) => {
+            e.stopPropagation();
+            placeLocalAsset(ref);
+          },
+        },
+        svgIcon('c-plus', 10),
+      ),
       h(
         'div',
         { class: 'r-main' },
@@ -451,13 +473,11 @@ export class Discovery {
       'div',
       {
         class: `result${importing ? ' importing' : ''}`,
-        draggable: importing ? 'false' : 'true',
-        ...tt('Drag onto a track', 'Drop it where you want the clip to start.'),
-        ondragstart: (e) => {
-          const dt = (e as DragEvent).dataTransfer;
-          if (!dt || importing) return;
-          dt.effectAllowed = 'copy';
-          dt.setData(SEARCH_RESULT_DND_TYPE, JSON.stringify(r));
+        'data-draggable': importing ? 'false' : 'true',
+        ...tt('Drag onto a track', 'A ghost shows where the clip will start.'),
+        onpointerdown: (e) => {
+          if (importing) return;
+          beginLibraryDrag(e as PointerEvent, { kind: 'result', result: r, title: r.title, duration: r.duration ?? 0 });
         },
       },
       h(
@@ -563,7 +583,6 @@ export class Discovery {
       off();
       const dt = (e as DragEvent).dataTransfer;
       if (!dt) return;
-      if (dt.getData(ASSET_DND_TYPE) || dt.getData(SEARCH_RESULT_DND_TYPE)) return; // internal drag
       const files = await filesFromDataTransfer(dt);
       if (files.length) await this.ingest(files);
     });

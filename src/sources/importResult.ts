@@ -135,10 +135,34 @@ export async function importResultToTimeline(
   }
 }
 
-/** Import a local file's AssetRef (already decoded) onto the timeline. */
-export function placeLocalAsset(ref: AssetRef, trackId?: string): void {
+/**
+ * Place a sound from the "Mine" bin. The bin lists every asset the project
+ * knows about, but only sounds already on the timeline are decoded when a
+ * saved session is reopened — placing one of the others straight away made a
+ * clip with no waveform that played silence. Decode it first (from this
+ * machine's cache, or its source URL), and say so if the audio is gone.
+ */
+export async function placeLibraryAsset(ref: AssetRef, trackId?: string, start?: number): Promise<void> {
   const p = store.get().project;
   const tid = trackId ?? p.tracks.find((t) => t.clips.length === 0)?.id ?? p.tracks[0]?.id;
   if (!tid) return;
-  placeAsset(ref, tid, contentEnd(p));
+  if (!assetStore.peek(ref.id)) {
+    const cached = await assetStore.isCached(ref.id);
+    if (!cached && !ref.downloadUrl) {
+      store.toast('warn', `The audio for “${ref.title}” is no longer on this machine. Drag the original file in again.`, 6000);
+      return;
+    }
+    try {
+      await assetStore.acquire(ref, { kind: 'url', url: ref.downloadUrl ?? '' });
+    } catch (err) {
+      store.toast('warn', err instanceof Error ? err.message : `Could not load “${ref.title}”.`);
+      return;
+    }
+  }
+  placeAsset(ref, tid, start ?? contentEnd(store.get().project));
+}
+
+/** The + on a Mine row: after everything else, on the first empty track. */
+export function placeLocalAsset(ref: AssetRef, trackId?: string): void {
+  void placeLibraryAsset(ref, trackId);
 }

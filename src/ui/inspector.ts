@@ -13,10 +13,14 @@ import { licenceName, licenceShort, licenceTone, ALL_LICENCE_IDS, makeLicence } 
 import {
   setClipFade,
   setClipLoop,
+  setClipGain,
+  setClipPan,
+  setTrackPan,
   updateAssetAuthor,
   updateAssetLicence,
 } from '../state/edits';
 import {
+  setAutomationView,
   toggleEq,
   toggleReverb,
   setEqBand,
@@ -24,7 +28,13 @@ import {
   setReverbPreset,
 } from '../state/effectEdits';
 import { REVERB_PRESETS } from '../audio/effects/reverb';
-import type { Clip, EqSettings, Track } from '../state/project';
+import type { AutomationParam, Clip, EqSettings, Track } from '../state/project';
+import { AUTOMATION_PARAMS } from './automationParams';
+
+const fmtPan = AUTOMATION_PARAMS.pan.format;
+/** Within this of centre, a pan slider settles on dead centre. */
+const PAN_DETENT = 0.04;
+const detent = (v: number) => (Math.abs(v) < PAN_DETENT ? 0 : v);
 
 export class Inspector {
   readonly el: HTMLElement;
@@ -66,9 +76,10 @@ export class Inspector {
             ? 'Select a clip to edit its source, gain, fades and effects.'
             : 'Select a track or clip. Its properties appear here.'),
       );
-      // still show track effects if a track is selected
+      // still show the track's own controls if a track is selected
       if (s.ui.selection.trackId) {
         const t = s.project.tracks.find((x) => x.id === s.ui.selection.trackId);
+        if (t) this.el.append(this.trackSection(s, t));
         if (t && s.ui.mode === 'advanced') {
           this.el.append(this.eqSection(t), this.reverbSection(t));
         }
@@ -117,12 +128,20 @@ export class Inspector {
           -40,
           12,
           0.5,
-          (v) =>
-            store.mutateProject((p) => {
-              const c = p.tracks.find((t) => t.id === track.id)?.clips.find((x) => x.id === clip.id);
-              if (c) c.gain = v;
-            }),
+          (v) => setClipGain(track.id, clip.id, v),
           (v) => `${fmtDb(v)} dB`,
+          0,
+        ),
+        sliderRow(
+          'Clip pan',
+          fmtPan(clip.pan ?? 0),
+          clip.pan ?? 0,
+          -1,
+          1,
+          0.01,
+          (v) => setClipPan(track.id, clip.id, detent(v)),
+          (v) => fmtPan(detent(v)),
+          0,
         ),
         sliderRow(
           'Fade in',
@@ -159,9 +178,62 @@ export class Inspector {
       ),
     );
 
+    this.el.append(this.trackSection(s, track));
     if (s.ui.mode === 'advanced') {
       this.el.append(this.eqSection(track), this.reverbSection(track));
     }
+  }
+
+  /**
+   * The track the selection sits on. Track pan was in the data model, the
+   * audio graph and the automation list, but had no control anywhere.
+   */
+  private trackSection(s: AppState, track: Track): HTMLElement {
+    const automated = (param: AutomationParam) =>
+      track.automation.some((l) => l.param === param && l.enabled && l.points.length > 0);
+    const panAutomated = automated('pan');
+    return h(
+      'div',
+      { class: 'insp-section' },
+      h(
+        'div',
+        { class: 'insp-h' },
+        h('span', { class: 'insp-title' }, track.name),
+        h('span', { class: 'mono-cap' }, 'TRACK'),
+      ),
+      sliderRow(
+        panAutomated ? 'Track pan (automated)' : 'Track pan',
+        fmtPan(track.pan),
+        track.pan,
+        -1,
+        1,
+        0.01,
+        (v) => setTrackPan(track.id, detent(v)),
+        (v) => fmtPan(detent(v)),
+        0,
+      ),
+      s.ui.mode === 'advanced'
+        ? h(
+            'div',
+            { class: 'automate-links' },
+            h('span', { class: 'k' }, 'Automate'),
+            ...(['gain', 'pan'] as const).map((param) =>
+              h(
+                'button',
+                {
+                  class: `linkish${automated(param) ? ' on' : ''}`,
+                  ...tt(
+                    `Draw a ${AUTOMATION_PARAMS[param].label.toLowerCase()} curve`,
+                    'Opens the automation lane on this track. Double-click the lane to add points.',
+                  ),
+                  onclick: () => setAutomationView(track.id, param),
+                },
+                AUTOMATION_PARAMS[param].label,
+              ),
+            ),
+          )
+        : null,
+    );
   }
 
   private editableAuthor(assetId: string | undefined, value: string): HTMLElement {
@@ -360,11 +432,17 @@ function sliderRow(
   step: number,
   onInput: (v: number) => void,
   format?: (v: number) => string,
+  /** double-clicking the slider puts it back here (0 dB, centre) */
+  reset?: number,
 ): HTMLElement {
   const valEl = h('span', { class: 'sr-val' }, valueText);
+  const set = (v: number) => {
+    if (format) valEl.textContent = format(v);
+    onInput(v);
+  };
   return h(
     'div',
-    { class: 'slider-row' },
+    { class: 'slider-row', ...(reset !== undefined ? tt(label, 'Double-click to reset') : {}) },
     h('div', { class: 'sr-h' }, h('span', {}, label), valEl),
     h('input', {
       type: 'range',
@@ -372,11 +450,15 @@ function sliderRow(
       max: String(max),
       step: String(step),
       value: String(value),
-      oninput: (e) => {
-        const v = Number((e.target as HTMLInputElement).value);
-        if (format) valEl.textContent = format(v);
-        onInput(v);
-      },
+      'aria-label': label,
+      oninput: (e) => set(Number((e.target as HTMLInputElement).value)),
+      ondblclick:
+        reset !== undefined
+          ? (e) => {
+              (e.target as HTMLInputElement).value = String(reset);
+              set(reset);
+            }
+          : undefined,
     }),
   );
 }
