@@ -30,7 +30,7 @@ No UI framework. A small number of long-lived panels driven by a central store.
 |---|---|---|
 | Data model | `src/state/project.ts` | Versioned schema with a migration hook. The `.scapemaker` file is this object as JSON — **no audio**. |
 | Store / history | `src/state/store.ts`, `history.ts`, `edits.ts`, `effectEdits.ts` | Subscribe/emit store; every timeline edit is an undoable command. |
-| Asset store | `src/audio/assetStore.ts` | **One decoded `AudioBuffer` per source asset.** Clips are non-owning views. Liveness is derived from the project (`retain`), not ref-counted — undo/redo move clips in and out without any acquire/release pair. Idle assets are kept until the memory is wanted, then swept oldest-first past 80% of budget; a live asset is never evicted, so a full budget is reported, not papered over. Originals cached in IndexedDB; decoded buffers never are. |
+| Asset store | `src/audio/assetStore.ts` | **One decoded `AudioBuffer` per source asset.** Clips are non-owning views. Liveness is derived from the project (`retain`), not ref-counted — undo/redo move clips in and out without any acquire/release pair. Idle assets are kept until the memory is wanted, then swept oldest-first past 80% of budget; a live asset is never evicted, so a full budget is reported, not papered over. Originals cached in IndexedDB; decoded buffers never are. A recording too long to fit is offered as an **excerpt** (`src/sources/excerpt.ts`): the student picks a section, which becomes its own asset with the original's credit, and is re-cut from the cached original on every load. |
 | Peaks | `src/audio/peaks.ts` | Multi-resolution `Int8Array` pyramid. Waveforms are **never** painted from raw samples. |
 | Graph | `src/audio/graph.ts` | One builder for live playback **and** the offline render, so the two cannot diverge. Each clip runs fade envelope → level → pan, so clip gain and pan move live without fighting a scheduled fade. |
 | Automation | `src/audio/automation.ts` | Linear / smooth / bezier. Bezier is sampled to a `Float32Array`; the **same** sampler runs live and offline. `tests/render-null.test.ts` guards it. |
@@ -82,9 +82,13 @@ clipping one, and it is one undo step.
   one iteration stretched across the full repeated span); dashed tick marks at
   each repeat boundary make the loop count legible in the meantime.
 - The Freesound preview CORS path still wants a one-off manual check.
-- The 600 MB asset budget is still a guess. It is now enforced and visible, so
-  hitting it is a clear refusal rather than a dead tab — but the number itself
-  has not been measured against a real classroom machine.
+- The 600 MB asset budget is still a guess. It is enforced and visible, and a
+  recording that will not fit becomes an offer to keep part of it — but the
+  number itself has not been measured against a real classroom machine. It is
+  about DECODED audio (48 kHz float: ~1.4 GB per stereo hour), not disk.
+- Finding out a recording is too long still decodes the whole file once, so a
+  very long one (2 h+) can momentarily exhaust a low-memory machine. Streaming
+  decode would need WebCodecs plus a demuxer per container.
 - Only one clip can be selected at a time; there is no rubber-band select and no
   track reordering.
 - Save-in-place needs the File System Access API (Chromium). Other browsers get

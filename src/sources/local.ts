@@ -7,7 +7,7 @@
  * student named as recordist by default.
  */
 
-import { assetStore } from '../audio/assetStore';
+import { acquireOrExcerpt } from './excerpt';
 import { warnIfCacheIsEvictable } from '../audio/storage';
 import { makeLicence } from '../licence/model';
 import type { AssetRef } from '../state/project';
@@ -86,7 +86,8 @@ export async function importFile(
   };
 
   try {
-    const entry = await assetStore.acquire(ref, { kind: 'blob', blob: file });
+    const entry = await acquireOrExcerpt(ref, { kind: 'blob', blob: file });
+    if (!entry) return { ok: false, name: file.name, reason: 'You chose not to import it.' };
     // Your own recording has no source URL to re-download from, so the cache
     // is the only copy. Say so once if the browser would not promise to keep it.
     void warnIfCacheIsEvictable();

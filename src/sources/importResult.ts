@@ -10,7 +10,8 @@
  * student staring at nothing and clicking again.
  */
 
-import { assetStore } from '../audio/assetStore';
+import { assetStore, cacheKey } from '../audio/assetStore';
+import { acquireOrExcerpt } from './excerpt';
 import { store } from '../state/store';
 import { placeAsset, acknowledgeRestriction } from '../state/edits';
 import { isRestrictive } from '../licence/model';
@@ -108,8 +109,11 @@ export async function importResultToTimeline(
     const ref = refFromResult(result, downloadUrl);
 
     store.updatePendingImport(pendingId, { phase: 'fetching', fraction: 0 });
+    // A recording too long for audio memory comes back as an excerpt the
+    // student chose — its own asset, placed instead of the whole file.
+    let placed: AssetRef;
     try {
-      await assetStore.acquire(
+      const entry = await acquireOrExcerpt(
         ref,
         { kind: 'url', url: downloadUrl },
         (fraction) => {
@@ -120,14 +124,16 @@ export async function importResultToTimeline(
         },
         abort.signal,
       );
+      if (!entry) return { ok: false, reason: 'cancelled' };
+      placed = entry.ref;
     } catch (err) {
       if (cancelled()) return { ok: false, reason: 'cancelled' };
       return { ok: false, reason: err instanceof Error ? err.message : 'Fetch/decode failed.' };
     }
     if (cancelled()) return { ok: false, reason: 'cancelled' };
 
-    placeAsset(ref, trackId, start);
-    if (isRestrictive(ref.licence) || ref.licence.id === 'unknown') acknowledgeRestriction(ref.id);
+    placeAsset(placed, trackId, start);
+    if (isRestrictive(placed.licence) || placed.licence.id === 'unknown') acknowledgeRestriction(placed.id);
     return { ok: true };
   } finally {
     inFlight.delete(pendingId);
@@ -146,20 +152,23 @@ export async function placeLibraryAsset(ref: AssetRef, trackId?: string, start?:
   const p = store.get().project;
   const tid = trackId ?? p.tracks.find((t) => t.clips.length === 0)?.id ?? p.tracks[0]?.id;
   if (!tid) return;
+  let placed = ref;
   if (!assetStore.peek(ref.id)) {
-    const cached = await assetStore.isCached(ref.id);
+    const cached = await assetStore.isCached(cacheKey(ref));
     if (!cached && !ref.downloadUrl) {
       store.toast('warn', `The audio for “${ref.title}” is no longer on this machine. Drag the original file in again.`, 6000);
       return;
     }
     try {
-      await assetStore.acquire(ref, { kind: 'url', url: ref.downloadUrl ?? '' });
+      const entry = await acquireOrExcerpt(ref, { kind: 'url', url: ref.downloadUrl ?? '' });
+      if (!entry) return;
+      placed = entry.ref;
     } catch (err) {
       store.toast('warn', err instanceof Error ? err.message : `Could not load “${ref.title}”.`);
       return;
     }
   }
-  placeAsset(ref, tid, start ?? contentEnd(store.get().project));
+  placeAsset(placed, tid, start ?? contentEnd(store.get().project));
 }
 
 /** The + on a Mine row: after everything else, on the first empty track. */

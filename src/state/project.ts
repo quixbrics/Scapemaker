@@ -61,6 +61,18 @@ export interface AssetRef {
   cached: boolean; // present in IndexedDB
   /** true once the user has seen and accepted a restrictive-licence warning */
   restrictionAcknowledged?: boolean;
+  /**
+   * Set when only part of a recording was kept because the whole of it would
+   * not fit in audio memory. `of` is the full original's id — also the key its
+   * file is cached under — and the section is re-cut from it on every load.
+   */
+  excerpt?: AssetExcerpt;
+}
+
+export interface AssetExcerpt {
+  of: AssetId;
+  start: number; // seconds into the original
+  duration: number;
 }
 
 export type FadeCurve = 'linear' | 'equalPower';

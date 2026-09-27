@@ -22,24 +22,70 @@ import type { AssetId, AssetRef } from '../state/project';
 
 /** Provisional until S3 is measured in-browser. ~600 MB of decoded audio. */
 export const ASSET_BUDGET_BYTES = 600 * 1024 * 1024;
-/** Sweep idle assets once memory passes this, leaving headroom for the next import. */
-const EVICT_ABOVE_BYTES = ASSET_BUDGET_BYTES * 0.8;
+/** Sweep idle assets once memory passes this fraction of the budget, leaving headroom for the next import. */
+const EVICT_ABOVE = 0.8;
 
-/** Raised when decoded audio will not fit, even after evicting idle assets. */
+/**
+ * Raised when decoded audio will not fit, even after evicting idle assets.
+ * `full` is the recording that was decoded to find that out, so the caller can
+ * offer to keep part of it (sources/excerpt.ts) without decoding it again.
+ */
 export class AssetBudgetError extends Error {
   constructor(
     readonly title: string,
     readonly needBytes: number,
     readonly usedBytes: number,
+    readonly budgetBytes = ASSET_BUDGET_BYTES,
+    readonly full?: AssetEntry,
   ) {
     super(
       `"${title}" needs ${formatBytes(needBytes)} of audio memory and there is not enough room ` +
-        `(${formatBytes(usedBytes)} of ${formatBytes(ASSET_BUDGET_BYTES)} in use). ` +
+        `(${formatBytes(usedBytes)} of ${formatBytes(budgetBytes)} in use). ` +
         `Delete some clips you are not using, or start a new project.`,
     );
     this.name = 'AssetBudgetError';
   }
 }
+
+/** Decoded audio is 32-bit float per channel per sample. */
+export function bytesPerSecond(sampleRate: number, channels: number): number {
+  return sampleRate * channels * 4;
+}
+
+/** Anything with an AudioBuffer's shape — lets the tests slice a fake one. */
+interface BufferLike {
+  readonly numberOfChannels: number;
+  readonly sampleRate: number;
+  readonly length: number;
+  getChannelData(channel: number): Float32Array;
+}
+
+/**
+ * Copy `[start, start + duration)` of `buffer` into a new buffer made by
+ * `create`. The original can then be dropped, which is the point.
+ */
+export function sliceBuffer<B extends BufferLike>(
+  buffer: BufferLike,
+  start: number,
+  duration: number,
+  create: (channels: number, length: number, sampleRate: number) => B,
+): B {
+  const from = Math.max(0, Math.min(buffer.length - 1, Math.round(start * buffer.sampleRate)));
+  const length = Math.max(1, Math.min(buffer.length - from, Math.round(duration * buffer.sampleRate)));
+  const out = create(buffer.numberOfChannels, length, buffer.sampleRate);
+  for (let c = 0; c < buffer.numberOfChannels; c++) {
+    out.getChannelData(c).set(buffer.getChannelData(c).subarray(from, from + length));
+  }
+  return out;
+}
+
+/** Where an asset's original file is cached: an excerpt shares its original's. */
+export function cacheKey(ref: Pick<AssetRef, 'id' | 'excerpt'>): AssetId {
+  return ref.excerpt?.of ?? ref.id;
+}
+
+const createInContext = (channels: number, length: number, sampleRate: number) =>
+  getAudioContext().createBuffer(channels, length, sampleRate);
 
 export function formatBytes(n: number): string {
   if (n <= 0) return '0 MB';
@@ -153,6 +199,12 @@ export class AssetStore {
   private idleSince = new Map<AssetId, number>();
   private inflight = new Map<AssetId, Promise<AssetEntry>>();
   private listeners = new Set<() => void>();
+  /**
+   * The audio-memory ceiling. A field rather than the bare constant so it can
+   * be lowered from the console to try the excerpt path without a huge file:
+   * `scapemaker.assetStore.budget = 50 * 2 ** 20`.
+   */
+  budget = ASSET_BUDGET_BYTES;
 
   subscribe(fn: () => void): () => void {
     this.listeners.add(fn);
@@ -168,14 +220,24 @@ export class AssetStore {
     return n;
   }
   get budgetBytes(): number {
-    return ASSET_BUDGET_BYTES;
+    return this.budget;
   }
   get overBudget(): boolean {
-    return this.usedBytes > ASSET_BUDGET_BYTES;
+    return this.usedBytes > this.budget;
   }
   /** 0..1 of the budget in use — what the meter draws. */
   get usedFraction(): number {
-    return this.usedBytes / ASSET_BUDGET_BYTES;
+    return this.usedBytes / this.budget;
+  }
+
+  /**
+   * Room for new audio if every idle asset were swept — what an excerpt may
+   * use. Live assets are never evicted, so they are the only thing counted.
+   */
+  roomBytes(): number {
+    let live = 0;
+    for (const [id, e] of this.entries) if (!this.idleSince.has(id)) live += e.bytes;
+    return Math.max(0, this.budget - live);
   }
 
   /**
@@ -193,7 +255,7 @@ export class AssetStore {
       if (this.live.has(id)) this.idleSince.delete(id);
       else if (!this.idleSince.has(id)) this.idleSince.set(id, now);
     }
-    if (this.usedBytes > EVICT_ABOVE_BYTES) this.sweep();
+    if (this.usedBytes > this.budget * EVICT_ABOVE) this.sweep();
   }
 
   /**
@@ -202,7 +264,7 @@ export class AssetStore {
    * of room is reported to the student, not silently papered over by unloading
    * audio their timeline still points at.
    */
-  private sweep(target = EVICT_ABOVE_BYTES): number {
+  private sweep(target = this.budget * EVICT_ABOVE): number {
     const idle = [...this.idleSince.entries()]
       .filter(([id]) => this.entries.has(id))
       .sort((a, b) => a[1] - b[1]);
@@ -266,19 +328,46 @@ export class AssetStore {
     const task = this.load(ref, source, onProgress, signal);
     this.inflight.set(ref.id, task);
     try {
-      const entry = await task;
-      // Make room before admitting it, then refuse rather than blow the budget.
-      if (this.usedBytes + entry.bytes > ASSET_BUDGET_BYTES) this.sweep(ASSET_BUDGET_BYTES - entry.bytes);
-      if (this.usedBytes + entry.bytes > ASSET_BUDGET_BYTES) {
-        throw new AssetBudgetError(ref.title, entry.bytes, this.usedBytes);
-      }
-      this.entries.set(ref.id, entry);
-      this.idleSince.delete(ref.id);
-      this.notify();
-      return entry;
+      return this.admit(await task, true);
     } finally {
       this.inflight.delete(ref.id);
     }
+  }
+
+  /**
+   * Keep only part of a recording that did not fit (the `full` entry carried
+   * by an AssetBudgetError). Cut from the buffer already in hand — no second
+   * fetch or decode — and admitted under the excerpt's own id.
+   */
+  admitExcerpt(full: AssetEntry, excerptRef: AssetRef): AssetEntry {
+    const ex = excerptRef.excerpt;
+    if (!ex) throw new Error('admitExcerpt needs a ref with an excerpt range');
+    const existing = this.entries.get(excerptRef.id);
+    if (existing) return this.admit(existing, false);
+    const buffer = sliceBuffer(full.buffer, ex.start, ex.duration, createInContext);
+    return this.admit(this.entryFor({ ...excerptRef }, buffer), false);
+  }
+
+  /** Make room, then refuse rather than blow the budget. */
+  private admit(entry: AssetEntry, offerExcerpt: boolean): AssetEntry {
+    const id = entry.ref.id;
+    if (this.usedBytes + entry.bytes > this.budget) this.sweep(this.budget - entry.bytes);
+    if (this.usedBytes + entry.bytes > this.budget) {
+      throw new AssetBudgetError(entry.ref.title, entry.bytes, this.usedBytes, this.budget, offerExcerpt ? entry : undefined);
+    }
+    this.entries.set(id, entry);
+    this.idleSince.delete(id);
+    this.notify();
+    return entry;
+  }
+
+  private entryFor(ref: AssetRef, buffer: AudioBuffer): AssetEntry {
+    const peaks = buildPeakPyramid(buffer);
+    const bytes = buffer.length * buffer.numberOfChannels * 4 + pyramidBytes(peaks);
+    ref.duration = buffer.duration;
+    ref.sampleRate = buffer.sampleRate;
+    ref.channels = buffer.numberOfChannels;
+    return { ref, buffer, peaks, bytes };
   }
 
   private async load(
@@ -290,7 +379,8 @@ export class AssetStore {
     let arrayBuf: ArrayBuffer;
     let blobForCache: Blob | null = null;
 
-    const cached = await idbGet(ref.id);
+    const key = cacheKey(ref);
+    const cached = await idbGet(key);
     if (cached) {
       arrayBuf = await cached.blob.arrayBuffer();
       ref.cached = true;
@@ -318,23 +408,19 @@ export class AssetStore {
       );
     }
 
-    const peaks = buildPeakPyramid(buffer);
-    const bytes = buffer.length * buffer.numberOfChannels * 4 + pyramidBytes(peaks);
-
     if (blobForCache) {
       // A working copy of the audio for the CURRENT project — allowed for every
       // source, Freesound included. Search results/metadata are never persisted
-      // (that rule is enforced in sources/freesound.ts).
-      void idbPut({ id: ref.id, blob: blobForCache, ref: { ...ref, cached: true }, savedAt: Date.now() });
+      // (that rule is enforced in sources/freesound.ts). An excerpt caches the
+      // whole original under the original's id: the cut is re-made on load.
+      void idbPut({ id: key, blob: blobForCache, ref: { ...ref, id: key, excerpt: undefined, cached: true }, savedAt: Date.now() });
       ref.cached = true;
     }
 
-    // Fill in real decoded characteristics.
-    ref.duration = buffer.duration;
-    ref.sampleRate = buffer.sampleRate;
-    ref.channels = buffer.numberOfChannels;
+    // Keep only the excerpt; the full decode is dropped when this returns.
+    if (ref.excerpt) buffer = sliceBuffer(buffer, ref.excerpt.start, ref.excerpt.duration, createInContext);
 
-    return { ref, buffer, peaks, bytes };
+    return this.entryFor(ref, buffer);
   }
 
   /** Remove from memory AND the IndexedDB cache. */
@@ -346,7 +432,7 @@ export class AssetStore {
     this.notify();
   }
 
-  /** For project load: is the original file available offline? */
+  /** For project load: is the original file available offline? Pass `cacheKey(ref)` for an excerpt. */
   async isCached(id: AssetId): Promise<boolean> {
     return (await idbGet(id)) !== undefined;
   }

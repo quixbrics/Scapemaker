@@ -540,3 +540,28 @@ body.col-resizing, body.col-resizing * { cursor: col-resize !important; user-sel
   font-family: var(--font-mono); font-size: 10.5px; padding: 1px 6px; border: 1px solid var(--border-strong);
   border-radius: 3px; background: var(--inset); color: var(--text-strong); white-space: nowrap;
 }
+
+/* ---------- excerpt dialog (dialogs/excerpt.ts) ---------- */
+.excerpt-dialog { max-width: 620px; }
+.excerpt-dialog .muted { color: var(--text-faint); font-size: 11.5px; }
+.excerpt-overview {
+  position: relative; height: 76px; margin: 14px 0 10px; border: 1px solid var(--border);
+  background: var(--inset); cursor: pointer; user-select: none; touch-action: none;
+}
+.excerpt-overview canvas { position: absolute; inset: 0; width: 100%; height: 100%; }
+.excerpt-window {
+  position: absolute; top: -1px; bottom: -1px; cursor: grab; min-width: 3px;
+  border: 1.5px solid var(--accent); background: color-mix(in srgb, var(--accent) 16%, transparent);
+  box-sizing: border-box;
+}
+.excerpt-window:active { cursor: grabbing; }
+.ew-edge { position: absolute; top: 0; bottom: 0; width: 9px; cursor: ew-resize; }
+.ew-edge.l { left: -5px; }
+.ew-edge.r { right: -5px; }
+.excerpt-fields { display: flex; align-items: center; gap: 16px; font-size: 12px; color: var(--text-2); flex-wrap: wrap; }
+.excerpt-dialog .excerpt-fields label { margin: 0; gap: 6px; }
+.excerpt-time {
+  width: 64px; padding: 4px 6px; border: 1px solid var(--border); border-radius: 3px;
+  background: var(--inset); color: var(--text); font-family: var(--font-mono); font-size: 11.5px;
+}
+.excerpt-dialog .row { align-items: center; }

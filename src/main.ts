@@ -7,7 +7,7 @@ import { installResumeOnGesture } from './audio/context';
 import { mountApp } from './ui/app';
 import { store } from './state/store';
 import { readAutosave, applyLoadedProject, clearAutosave } from './state/persist';
-import { assetStore } from './audio/assetStore';
+import { assetStore, cacheKey } from './audio/assetStore';
 import { newProject, type Project } from './state/project';
 import { ensurePersistentStorage } from './audio/storage';
 import { askToRecoverSession } from './ui/dialogs/recoverSession';
@@ -80,7 +80,7 @@ async function reacquireAssets(project: Project): Promise<void> {
     [...used].map(async (id) => {
       const ref = project.assets[id];
       if (!ref) return;
-      const cached = await assetStore.isCached(id);
+      const cached = await assetStore.isCached(cacheKey(ref));
       if (!cached && !ref.downloadUrl) return;
       await assetStore
         .acquire(ref, { kind: 'url', url: ref.downloadUrl ?? '' })

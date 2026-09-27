@@ -8,7 +8,7 @@
 import { openDB } from 'idb';
 import type { AssetRef, Project } from './project';
 import { migrate, newProject } from './project';
-import { assetStore } from '../audio/assetStore';
+import { assetStore, cacheKey } from '../audio/assetStore';
 import { store } from './store';
 import { history } from './history';
 import { downloadBlob, safeName } from '../export/download';
@@ -95,7 +95,7 @@ export async function loadProjectFromText(text: string): Promise<LoadResult> {
     const ref = project.assets[id];
     if (!ref) continue;
     try {
-      if (await assetStore.isCached(id)) {
+      if (await assetStore.isCached(cacheKey(ref))) {
         await assetStore.acquire(ref, { kind: 'url', url: ref.downloadUrl ?? '' });
       } else if (ref.downloadUrl) {
         await assetStore.acquire(ref, { kind: 'url', url: ref.downloadUrl });
